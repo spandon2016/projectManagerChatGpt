@@ -1,0 +1,30 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.js
+
+# testing
+/coverage
+
+# production
+/build
+
+# misc
+.DS_Store
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm-cache/_update-notifier-last-checked
+.npm-cache/_cacache/content-v2/sha512/00/25/26dcbd3f8e2653a9fcd13371e2f50f1e66a77a20adfb98c58f2f3f4f27190b5a59587917fe1075121d812d168a7612acad6aad458b315587b5df0675c20d
+.npm-cache/_cacache/content-v2/sha512/00/5d/ebecfe5d5b12fc331c884d132539140d68e036224005693af893b054ba68cfb51a460d36699743dbd5708ee89783081769d76e8282cf6c331a928e063246
+.npm-cache/* 
+src/reportWebVitals.js
+backend/backend.err.log
+backend/backend.log
