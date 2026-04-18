@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import './App.css';
 import Company from './models/company';
 import User from './models/user';
+import Calendar from './models/calendar';
 import { companiesAPI, usersAPI, healthAPI, calendarsAPI, tasksAPI, schedulesAPI } from './services/api';
 
 function App() {
@@ -53,10 +54,18 @@ function App() {
 
     const projects = await Promise.all((scheduleRows || []).map(async (schedule) => {
       const taskRows = await tasksAPI.getByProjectId(schedule.id);
+      const calendar = calendarData ? Calendar.fromObject(calendarData) : new Calendar();
+      
+      // Recalculate all task times based on current calendar
+      const recalculatedTaskLists = {};
+      for (const [resourceKey, tasks] of Object.entries(groupTasksByResource(taskRows || []))) {
+        recalculatedTaskLists[resourceKey] = recalcResourceList(tasks, 1, schedule.startDate, calendar);
+      }
+      
       return {
         id: schedule.id,
         name: schedule.name,
-        taskLists: groupTasksByResource(taskRows || []),
+        taskLists: recalculatedTaskLists,
         taskInput: '',
         durationInput: '',
         resourceInput: '',
@@ -88,7 +97,16 @@ function App() {
     try {
       const companyRows = await companiesAPI.getByUserId(userId);
       const hydrated = await Promise.all((companyRows || []).map(hydrateCompanyFromBackend));
-      setCompanies(hydrated);
+      
+      // Validate and adjust project start dates based on current calendars
+      const validated = hydrated.map(company => ({
+        ...company,
+        projects: company.projects.map(project => 
+          validateAndAdjustProjectStartDate(project, company.calendar)
+        )
+      }));
+      
+      setCompanies(validated);
     } catch (error) {
       console.error('Failed to load companies from backend:', error);
       setCompanies([]);
@@ -99,6 +117,32 @@ function App() {
     if (currentUser?.id) {
       await loadCompaniesForUser(currentUser.id);
     }
+  };
+
+  // --- Calendar validation helper ---
+  const validateAndAdjustProjectStartDate = (project, calendar) => {
+    if (!calendar || !project.startDate) return project;
+    
+    const currentStart = new Date(project.startDate);
+    const adjustedStart = adjustToWorkStart(currentStart, calendar);
+    
+    if (adjustedStart.getTime() !== currentStart.getTime()) {
+      // Start date changed, need to recalculate all tasks
+      const updatedTaskLists = Object.fromEntries(
+        Object.entries(project.taskLists || {}).map(([resourceKey, tasks]) => [
+          resourceKey,
+          recalcResourceList(tasks, 1, adjustedStart.toISOString(), calendar)
+        ])
+      );
+      
+      return {
+        ...project,
+        startDate: adjustedStart.toISOString(),
+        taskLists: updatedTaskLists
+      };
+    }
+    
+    return project;
   };
 
   // --- Work time helpers ---
@@ -561,12 +605,48 @@ function App() {
   const handleAddNonWorkingDay = async (dateString) => {
     if (!dateString || !calendarCompanyId) return;
     await calendarsAPI.addNonWorkingDay(`cal_${calendarCompanyId}`, dateString);
+    
+    // Recalculate all tasks for companies using this calendar
+    setCompanies(prev => prev.map(company => {
+      if (company.calendar?.id === `cal_${calendarCompanyId}`) {
+        const updatedProjects = company.projects.map(project => ({
+          ...project,
+          taskLists: Object.fromEntries(
+            Object.entries(project.taskLists || {}).map(([resourceKey, tasks]) => [
+              resourceKey,
+              recalcResourceList(tasks, 1, project.startDate, company.calendar)
+            ])
+          )
+        }));
+        return { ...company, projects: updatedProjects };
+      }
+      return company;
+    }));
+    
     await reloadCurrentUserData();
   };
 
   const handleRemoveNonWorkingDay = async (dateString) => {
     if (!dateString || !calendarCompanyId) return;
     await calendarsAPI.removeNonWorkingDay(`cal_${calendarCompanyId}`, dateString);
+    
+    // Recalculate all tasks for companies using this calendar
+    setCompanies(prev => prev.map(company => {
+      if (company.calendar?.id === `cal_${calendarCompanyId}`) {
+        const updatedProjects = company.projects.map(project => ({
+          ...project,
+          taskLists: Object.fromEntries(
+            Object.entries(project.taskLists || {}).map(([resourceKey, tasks]) => [
+              resourceKey,
+              recalcResourceList(tasks, 1, project.startDate, company.calendar)
+            ])
+          )
+        }));
+        return { ...company, projects: updatedProjects };
+      }
+      return company;
+    }));
+    
     await reloadCurrentUserData();
   };
 

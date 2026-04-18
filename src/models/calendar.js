@@ -30,13 +30,13 @@ class Calendar {
 
   setToWorkStart(d) {
     const r = new Date(d);
-    r.setHours(this.workStartHour, 0, 0, 0);
+    r.setUTCHours(this.workStartHour, 0, 0, 0);
     return r;
   }
 
   setToWorkEnd(d) {
     const r = new Date(d);
-    r.setHours(this.workEndHour, 0, 0, 0);
+    r.setUTCHours(this.workEndHour, 0, 0, 0);
     return r;
   }
 
