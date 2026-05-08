@@ -21,9 +21,17 @@ function initializeDatabase() {
         id TEXT PRIMARY KEY,
         email TEXT UNIQUE NOT NULL,
         passwordHash TEXT NOT NULL,
+        role TEXT DEFAULT 'user',
         createdAt TEXT NOT NULL
       )
     `);
+
+    // Add role column if it doesn't exist (for migration)
+    db.run(`ALTER TABLE users ADD COLUMN role TEXT DEFAULT 'user'`, (err) => {
+      if (err && !err.message.includes('duplicate column name')) {
+        console.error('Error adding role column:', err);
+      }
+    });
 
     // Calendars table
     db.run(`

@@ -5,6 +5,7 @@ class User {
     this.id = opts.id || String(Date.now());
     this.email = opts.email || '';
     this.passwordHash = opts.passwordHash || '';
+    this.role = opts.role || 'user';
     this.createdAt = opts.createdAt || new Date();
   }
 
@@ -27,6 +28,7 @@ class User {
     return {
       id: this.id,
       email: this.email,
+      role: this.role,
       createdAt: this.createdAt
     };
   }
@@ -36,6 +38,7 @@ class User {
       id: obj.id,
       email: obj.email,
       passwordHash: obj.passwordHash,
+      role: obj.role || 'user',
       createdAt: obj.createdAt ? new Date(obj.createdAt) : new Date()
     });
     return user;

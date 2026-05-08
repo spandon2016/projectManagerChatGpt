@@ -28,3 +28,4 @@ yarn-error.log*
 src/reportWebVitals.js
 backend/backend.err.log
 backend/backend.log
+backend/seed-admin.js

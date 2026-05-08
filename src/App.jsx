@@ -3,6 +3,7 @@ import './App.css';
 import Company from './models/company';
 import User from './models/user';
 import Calendar from './models/calendar';
+import AdminConsole from './components/AdminConsole';
 import { companiesAPI, usersAPI, healthAPI, calendarsAPI, tasksAPI, schedulesAPI } from './services/api';
 
 function App() {
@@ -29,6 +30,7 @@ function App() {
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
   const [backendConnected, setBackendConnected] = useState(false);
+  const [view, setView] = useState('main'); // 'main' or 'admin'
 
   const groupTasksByResource = (tasks = []) => {
     return tasks.reduce((acc, task) => {
@@ -242,6 +244,7 @@ function App() {
         const userData = await usersAPI.login(authEmail, authPassword);
         const user = User.fromObject(userData);
         setCurrentUser(user);
+        setView(user.role === 'admin' ? 'admin' : 'main');
         setAuthEmail('');
         setAuthPassword('');
         return;
@@ -1039,11 +1042,18 @@ function App() {
                 </span>
               </div>
               <span>Welcome, {currentUser.email} </span>
+              {currentUser.role === 'admin' && (
+                <button onClick={() => setView(view === 'admin' ? 'main' : 'admin')} style={{ marginLeft: '8px' }}>
+                  {view === 'admin' ? 'Back to Main' : 'Admin Console'}
+                </button>
+              )}
               <button onClick={handleLogout} style={{ marginLeft: '8px' }}>Logout</button>
             </div>
 
             {/* Views */}
-            {calendarCompanyId ? (
+            {view === 'admin' ? (
+              <AdminConsole currentUser={currentUser} onLogout={handleLogout} />
+            ) : calendarCompanyId ? (
           <div>
             <div style={{ marginBottom: '12px' }}>
               <button onClick={() => setCalendarCompanyId(null)}>← Back</button>

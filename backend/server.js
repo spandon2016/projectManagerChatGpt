@@ -11,6 +11,20 @@ const PORT = 5000;
 app.use(cors());
 app.use(bodyParser.json());
 
+// Admin check middleware
+const requireAdmin = (req, res, next) => {
+  // For simplicity, assume user ID is passed in headers or body; in production, use JWT
+  const userId = req.headers['user-id'] || req.body.userId;
+  if (!userId) return res.status(401).json({ error: 'User not authenticated' });
+  
+  db.get('SELECT role FROM users WHERE id = ?', [userId], (err, row) => {
+    if (err || !row || row.role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    next();
+  });
+};
+
 // ==================== USER ENDPOINTS ====================
 
 // Get all users
@@ -97,6 +111,100 @@ app.get('/api/users/:email', (req, res) => {
       res.status(404).json({ error: 'User not found' });
     } else {
       res.json(row);
+    }
+  });
+});
+
+// ==================== ADMIN ENDPOINTS ====================
+
+// Get all users (admin only)
+app.get('/api/admin/users', requireAdmin, (req, res) => {
+  db.all('SELECT id, email, role, createdAt FROM users', (err, rows) => {
+    if (err) {
+      res.status(500).json({ error: err.message });
+    } else {
+      res.json(rows || []);
+    }
+  });
+});
+
+// Create user (admin only)
+app.post('/api/admin/users', requireAdmin, async (req, res) => {
+  const { id, email, password, role } = req.body;
+  
+  if (!id || !email || !password) {
+    return res.status(400).json({ error: 'Missing required fields' });
+  }
+
+  try {
+    const passwordHash = await argon2.hash(password);
+    
+    db.run(
+      'INSERT INTO users (id, email, passwordHash, role, createdAt) VALUES (?, ?, ?, ?, ?)',
+      [id, email, passwordHash, role || 'user', new Date().toISOString()],
+      function(err) {
+        if (err) {
+          res.status(500).json({ error: err.message });
+        } else {
+          res.json({ id, email, role: role || 'user' });
+        }
+      }
+    );
+  } catch (error) {
+    res.status(500).json({ error: 'Password hashing failed' });
+  }
+});
+
+// Delete user (admin only)
+app.delete('/api/admin/users/:id', requireAdmin, (req, res) => {
+  const { id } = req.params;
+  
+  db.run('DELETE FROM users WHERE id = ?', [id], function(err) {
+    if (err) {
+      res.status(500).json({ error: err.message });
+    } else if (this.changes === 0) {
+      res.status(404).json({ error: 'User not found' });
+    } else {
+      res.json({ success: true });
+    }
+  });
+});
+
+// Reset user password (admin only)
+app.put('/api/admin/users/:id/reset-password', requireAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { newPassword } = req.body;
+  
+  if (!newPassword) {
+    return res.status(400).json({ error: 'New password required' });
+  }
+
+  try {
+    const passwordHash = await argon2.hash(newPassword);
+    
+    db.run('UPDATE users SET passwordHash = ? WHERE id = ?', [passwordHash, id], function(err) {
+      if (err) {
+        res.status(500).json({ error: err.message });
+      } else if (this.changes === 0) {
+        res.status(404).json({ error: 'User not found' });
+      } else {
+        res.json({ success: true });
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Password hashing failed' });
+  }
+});
+
+// Get schedules for a user (admin only)
+app.get('/api/admin/users/:userId/schedules', requireAdmin, (req, res) => {
+  const { userId } = req.params;
+  
+  db.all('SELECT * FROM schedules WHERE userId = ?', [userId], (err, rows) => {
+    if (err) {
+      res.status(500).json({ error: err.message });
+    } else {
+      res.json(rows || []);
     }
   });
 });

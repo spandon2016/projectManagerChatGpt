@@ -57,6 +57,70 @@ export const usersAPI = {
       console.error('Error fetching user:', error);
       return null;
     }
+  },
+
+  // Admin methods
+  async getAllAdmin(userId) {
+    try {
+      const response = await fetch(`${API_URL}/admin/users`, {
+        headers: { 'user-id': userId }
+      });
+      if (!response.ok) throw new Error('Failed to fetch users');
+      return await response.json();
+    } catch (error) {
+      console.error('Error fetching users:', error);
+      return [];
+    }
+  },
+
+  async createAdmin(user, adminUserId) {
+    try {
+      const response = await fetch(`${API_URL}/admin/users`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'user-id': adminUserId
+        },
+        body: JSON.stringify(user)
+      });
+      if (!response.ok) throw new Error('Failed to create user');
+      return await response.json();
+    } catch (error) {
+      console.error('Error creating user:', error);
+      throw error;
+    }
+  },
+
+  async deleteAdmin(userId, adminUserId) {
+    try {
+      const response = await fetch(`${API_URL}/admin/users/${userId}`, {
+        method: 'DELETE',
+        headers: { 'user-id': adminUserId }
+      });
+      if (!response.ok) throw new Error('Failed to delete user');
+      return await response.json();
+    } catch (error) {
+      console.error('Error deleting user:', error);
+      throw error;
+    }
+  },
+
+  async resetPasswordAdmin(userId, newPassword, adminUserId) {
+    try {
+      const response = await fetch(`${API_URL}/admin/users/${userId}/reset-password`, {
+        method: 'PUT',
+        headers: { 
+          'Content-Type': 'application/json',
+          'user-id': adminUserId
+        },
+        body: JSON.stringify({ newPassword })
+      });
+      if (!response.ok) throw new Error('Failed to reset password');
+      return await response.json();
+    } catch (error) {
+      console.error('Error resetting password:', error);
+      throw error;
+    }
   }
 };
 
