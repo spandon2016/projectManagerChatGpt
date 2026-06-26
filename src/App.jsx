@@ -1,5 +1,46 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import './App.css';
+
+// Sequence input that keeps a local draft so the user can type multi-digit
+// numbers and click the stepper freely. The change is committed (triggering the
+// resequence + recalc) a short moment after they stop editing, and immediately
+// on blur or Enter — so the schedule recalculates without requiring an explicit
+// blur, but without firing a DB round-trip on every keystroke.
+function SeqNumberInput({ value, onCommit, style }) {
+  const [draft, setDraft] = useState(value);
+
+  // Re-sync when the canonical value changes (e.g. after a resequence elsewhere).
+  useEffect(() => { setDraft(value); }, [value]);
+
+  const isCommittable = () => {
+    const val = String(draft).trim();
+    return val !== '' && !isNaN(val) && parseInt(val, 10) !== value;
+  };
+
+  // Debounced auto-commit: apply ~600ms after the user stops typing/stepping.
+  useEffect(() => {
+    if (!isCommittable()) return;
+    const id = setTimeout(() => onCommit(String(draft).trim()), 600);
+    return () => clearTimeout(id);
+  }, [draft]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const commitNow = () => {
+    if (isCommittable()) onCommit(String(draft).trim());
+    else setDraft(value); // revert invalid / unchanged input
+  };
+
+  return (
+    <input
+      type="number"
+      min="0"
+      value={draft}
+      onChange={e => setDraft(e.target.value)}
+      onBlur={commitNow}
+      onKeyDown={e => { if (e.key === 'Enter') e.target.blur(); }}
+      style={style}
+    />
+  );
+}
 import Company from './models/company';
 import User from './models/user';
 import Calendar from './models/calendar';
@@ -71,6 +112,7 @@ function App() {
         taskInput: '',
         durationInput: '',
         resourceInput: '',
+        sequenceInput: '',
         startDate: schedule.startDate,
         endDate: schedule.endDate
       };
@@ -592,7 +634,7 @@ function App() {
   const recalcAllProjectsForCompany = (companyId) => {
     setCompanies(prev => prev.map(c => {
       if (c.id !== companyId) return c;
-      const nc = Company.fromObject(c.toJSON());
+      const nc = Company.fromObject(c);
       nc.projects = (nc.projects || []).map(project => {
         const taskLists = project.taskLists || {};
         const newLists = {};
@@ -739,7 +781,7 @@ function App() {
     if (!selectedCompanyId) return;
     setCompanies(prev => prev.map(c => {
       if (c.id !== selectedCompanyId) return c;
-      const nc = Company.fromObject(c.toJSON());
+      const nc = Company.fromObject(c);
       nc.projects = (nc.projects || []).map(project => project.id === projectId ? { ...project, taskInput: value } : project);
       return nc;
     }));
@@ -749,7 +791,7 @@ function App() {
     if (!selectedCompanyId) return;
     setCompanies(prev => prev.map(c => {
       if (c.id !== selectedCompanyId) return c;
-      const nc = Company.fromObject(c.toJSON());
+      const nc = Company.fromObject(c);
       nc.projects = (nc.projects || []).map(project => project.id === projectId ? { ...project, durationInput: value } : project);
       return nc;
     }));
@@ -759,8 +801,18 @@ function App() {
     if (!selectedCompanyId) return;
     setCompanies(prev => prev.map(c => {
       if (c.id !== selectedCompanyId) return c;
-      const nc = Company.fromObject(c.toJSON());
+      const nc = Company.fromObject(c);
       nc.projects = (nc.projects || []).map(project => project.id === projectId ? { ...project, resourceInput: value } : project);
+      return nc;
+    }));
+  };
+
+  const handleSequenceInputChange = (projectId, value) => {
+    if (!selectedCompanyId) return;
+    setCompanies(prev => prev.map(c => {
+      if (c.id !== selectedCompanyId) return c;
+      const nc = Company.fromObject(c);
+      nc.projects = (nc.projects || []).map(project => project.id === projectId ? { ...project, sequenceInput: value } : project);
       return nc;
     }));
   };
@@ -855,9 +907,13 @@ function App() {
     const resources = (project.resourceInput || '').split(',').map(r => r.trim()).filter(v => v !== '');
     if (resources.length === 0) resources.push('');
 
+    // Use provided sequence number or calculate it
+    const providedSeq = project.sequenceInput ? parseInt(project.sequenceInput, 10) : null;
+    const isValidSeq = providedSeq !== null && !isNaN(providedSeq) && providedSeq >= 0;
+
     resources.forEach(resKey => {
       if (!lists[resKey]) lists[resKey] = [];
-      const seq = lists[resKey].reduce((m, t) => Math.max(m, (t.seq || 0)), 0) + 1;
+      const seq = isValidSeq ? providedSeq : (lists[resKey].reduce((m, t) => Math.max(m, (t.seq || 0)), 0) + 1);
       const last = lists[resKey].slice().sort((a, b) => (a.seq || 0) - (b.seq || 0)).slice(-1)[0];
       const rawStart = last ? new Date(last.endTime) : (project.startDate || new Date());
       const startTime = adjustToWorkStart(rawStart, company.calendar);
@@ -912,35 +968,65 @@ function App() {
   };
 
   const handleTaskSeqChange = async (projectId, taskId, newSeqRaw) => {
-    if (!selectedCompanyId || !backendConnected) return;
+    console.log('🔍 handleTaskSeqChange called:', { projectId, taskId, newSeqRaw, selectedCompanyId, backendConnected });
+    if (!selectedCompanyId || !backendConnected) {
+      console.warn('⚠️ Returning early: selectedCompanyId=', selectedCompanyId, 'backendConnected=', backendConnected);
+      return;
+    }
     const newSeq = parseInt(newSeqRaw, 10);
-    if (isNaN(newSeq)) return;
+    if (isNaN(newSeq)) {
+      console.warn('⚠️ Invalid sequence number:', newSeqRaw);
+      return;
+    }
 
     let updatedTask = null;
     const company = companies.find(c => c.id === selectedCompanyId);
     const project = company?.projects?.find(p => p.id === projectId);
     const lists = { ...(project?.taskLists || {}) };
     const found = findTaskInLists(lists, taskId);
-    if (!company || !project || !found) return;
+    console.log('🔍 Found task:', { company: !!company, project: !!project, found: !!found });
+    if (!company || !project || !found) {
+      console.warn('⚠️ Missing company, project, or found task');
+      return;
+    }
     const { resourceKey } = found;
 
-    lists[resourceKey] = lists[resourceKey].map(t => t.id === taskId ? { ...t, seq: newSeq } : t);
-    lists[resourceKey] = resequenceTasksInList(lists[resourceKey]);
     const oldSeq = found.task ? (found.task.seq || 0) : 0;
-    const threshold = Math.min(oldSeq || 1, newSeq || 1);
-    lists[resourceKey] = recalcResourceList(lists[resourceKey], threshold, project.startDate, company.calendar);
+    // Bias the edited task just before (moving earlier) or just after (moving later)
+    // the task currently occupying newSeq, then renumber everyone to a clean
+    // contiguous 1..N. This shifts the displaced tasks instead of creating a
+    // duplicate seq (mirrors handleTaskResourceChange's resequence step).
+    const tempSeq = newSeq <= oldSeq ? newSeq - 0.5 : newSeq + 0.5;
+    lists[resourceKey] = lists[resourceKey].map(t => t.id === taskId ? { ...t, seq: tempSeq } : t);
+    lists[resourceKey] = resequenceTasksInList(lists[resourceKey]);
+    lists[resourceKey] = recalcResourceList(lists[resourceKey], 1, project.startDate, company.calendar);
     updatedTask = lists[resourceKey].find(t => t.id === taskId) || null;
 
     if (updatedTask) {
+      console.log('✅ Updated task in memory:', { seq: updatedTask.seq, id: updatedTask.id });
+      // Update local state immediately to show recalculated times
+      setCompanies(prev => prev.map(c => {
+        if (c.id !== selectedCompanyId) return c;
+        return { ...c, projects: (c.projects || []).map(p => {
+          if (p.id !== projectId) return p;
+          return { ...p, taskLists: lists };
+        }) };
+      }));
+
       try {
-        await tasksAPI.update(String(updatedTask.id), {
-          seq: updatedTask.seq,
-          startTime: updatedTask.startTime ? new Date(updatedTask.startTime).toISOString() : '',
-          endTime: updatedTask.endTime ? new Date(updatedTask.endTime).toISOString() : ''
-        });
-        await reloadCurrentUserData();
+        // Save ALL recalculated tasks in this resource to preserve the schedule
+        const tasksToUpdate = lists[resourceKey];
+        console.log(`📌 Saving ${tasksToUpdate.length} tasks to database...`);
+        for (const task of tasksToUpdate) {
+          await tasksAPI.update(String(task.id), {
+            seq: task.seq,
+            startTime: task.startTime ? new Date(task.startTime).toISOString() : '',
+            endTime: task.endTime ? new Date(task.endTime).toISOString() : ''
+          });
+        }
+        console.log('✅ All tasks updated in database');
       } catch (error) {
-        console.warn('Failed to update task sequence in database:', error);
+        console.warn('❌ Failed to update tasks in database:', error);
       }
     }
   };
@@ -1273,6 +1359,14 @@ function App() {
                           onChange={e => handleResourceInputChange(project.id, e.target.value)}
                           style={{ width: '160px', marginRight: '8px' }}
                         />
+                        <input
+                          type="number"
+                          min="0"
+                          placeholder="Seq (0-n)"
+                          value={project.sequenceInput || ''}
+                          onChange={e => handleSequenceInputChange(project.id, e.target.value)}
+                          style={{ width: '80px', marginRight: '8px' }}
+                        />
                         <button onClick={() => handleAddTask(project.id)}>Add Task</button>
                       </div>
 
@@ -1290,21 +1384,19 @@ function App() {
                                   .slice()
                                   .sort((a, b) => (a.seq || 0) - (b.seq || 0) || (a.id - b.id))
                                   .map(task => (
-                                    <li key={task.id} style={{ marginBottom: '8px' }}>
-                                      <label style={{ marginRight: '8px', fontSize: '0.9em' }}>
-                                        Seq:
-                                        <input
-                                          type="number"
-                                          value={task.seq || 0}
-                                          onChange={e => handleTaskSeqChange(project.id, task.id, e.target.value)}
-                                          style={{ width: '70px', marginLeft: '6px' }}
+                                    <li key={task.id} style={{ marginBottom: '12px', paddingBottom: '8px', borderBottom: '1px solid #333' }}>
+                                      <div style={{ marginBottom: '6px', display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                                        <span style={{ fontSize: '0.9em', fontWeight: 'bold' }}>Seq:</span>
+                                        <SeqNumberInput
+                                          value={task.seq !== undefined && task.seq !== null ? task.seq : 0}
+                                          onCommit={val => handleTaskSeqChange(project.id, task.id, val)}
+                                          style={{ width: '60px', padding: '8px', border: '2px solid #4CAF50', borderRadius: '4px', fontSize: '1em', backgroundColor: '#fff', color: '#000', cursor: 'text', boxSizing: 'border-box' }}
                                         />
-                                      </label>
-
-                                      <strong style={{ color: (project.endDate && task.endTime && (new Date(task.endTime).getTime() > new Date(project.endDate).getTime())) ? 'crimson' : undefined }}>{task.name}</strong>
-                                      <span style={{ fontSize: '0.8em', color: '#666', marginLeft: '8px' }}>
-                                        (Task ID: {task.id})
-                                      </span>
+                                        <strong style={{ color: (project.endDate && task.endTime && (new Date(task.endTime).getTime() > new Date(project.endDate).getTime())) ? 'crimson' : undefined }}>{task.name}</strong>
+                                        <span style={{ fontSize: '0.8em', color: '#666' }}>
+                                          (Task ID: {task.id})
+                                        </span>
+                                      </div>
 
                                       <div style={{ marginTop: '6px', fontSize: '0.95em', color: '#555' }}>
                                         Start:
