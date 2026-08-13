@@ -100,6 +100,12 @@ function initializeDatabase() {
         duration INTEGER,
         startTime TEXT,
         endTime TEXT,
+        actualStart TEXT,
+        actualEnd TEXT,
+        actualDuration INTEGER,
+        actualSequence INTEGER,
+        percentComplete REAL,
+        actualResource TEXT,
         createdAt TEXT NOT NULL,
         updatedAt TEXT NOT NULL,
         FOREIGN KEY (scheduleId) REFERENCES schedules(id),
@@ -107,6 +113,37 @@ function initializeDatabase() {
         FOREIGN KEY (userId) REFERENCES users(id)
       )
     `);
+
+    db.run(`ALTER TABLE tasks ADD COLUMN actualStart TEXT`, (err) => {
+      if (err && !err.message.includes('duplicate column name')) {
+        console.error('Error adding actualStart column:', err);
+      }
+    });
+    db.run(`ALTER TABLE tasks ADD COLUMN actualEnd TEXT`, (err) => {
+      if (err && !err.message.includes('duplicate column name')) {
+        console.error('Error adding actualEnd column:', err);
+      }
+    });
+    db.run(`ALTER TABLE tasks ADD COLUMN actualDuration INTEGER`, (err) => {
+      if (err && !err.message.includes('duplicate column name')) {
+        console.error('Error adding actualDuration column:', err);
+      }
+    });
+    db.run(`ALTER TABLE tasks ADD COLUMN percentComplete REAL`, (err) => {
+      if (err && !err.message.includes('duplicate column name')) {
+        console.error('Error adding percentComplete column:', err);
+      }
+    });
+    db.run(`ALTER TABLE tasks ADD COLUMN actualSequence INTEGER`, (err) => {
+      if (err && !err.message.includes('duplicate column name')) {
+        console.error('Error adding actualSequence column:', err);
+      }
+    });
+    db.run(`ALTER TABLE tasks ADD COLUMN actualResource TEXT`, (err) => {
+      if (err && !err.message.includes('duplicate column name')) {
+        console.error('Error adding actualResource column:', err);
+      }
+    });
 
     console.log('Database schema initialized successfully');
   });

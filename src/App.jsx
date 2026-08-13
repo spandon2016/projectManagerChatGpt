@@ -84,7 +84,13 @@ function App() {
         seq: task.seq || 0,
         duration: task.duration || 0,
         startTime: task.startTime || '',
-        endTime: task.endTime || ''
+        endTime: task.endTime || '',
+        actualStart: task.actualStart || null,
+        actualEnd: task.actualEnd || null,
+        actualDuration: task.actualDuration ?? null,
+        actualSequence: task.actualSequence ?? null,
+        actualResource: task.actualResource ?? '',
+        percentComplete: task.percentComplete ?? 0
       });
       acc[resourceKey].sort((a, b) => (a.seq || 0) - (b.seq || 0) || String(a.id).localeCompare(String(b.id)));
       return acc;
@@ -608,6 +614,12 @@ function App() {
                   duration: task.duration || 0,
                   startTime: task.startTime ? (new Date(task.startTime)).toISOString() : '',
                   endTime: task.endTime ? (new Date(task.endTime)).toISOString() : '',
+                  actualStart: task.actualStart ?? null,
+                  actualEnd: task.actualEnd ?? null,
+                  actualDuration: task.actualDuration ?? null,
+                  actualSequence: task.actualSequence ?? null,
+                  actualResource: task.actualResource ?? '',
+                  percentComplete: task.percentComplete ?? 0,
                   createdAt: now,
                   updatedAt: now
                 });
@@ -853,7 +865,11 @@ function App() {
           seq: updatedTask.seq,
           startTime: updatedTask.startTime ? new Date(updatedTask.startTime).toISOString() : '',
           endTime: updatedTask.endTime ? new Date(updatedTask.endTime).toISOString() : '',
-          duration: updatedTask.duration
+          duration: updatedTask.duration,
+          actualStart: updatedTask.actualStart ?? null,
+          actualEnd: updatedTask.actualEnd ?? null,
+          actualDuration: updatedTask.actualDuration ?? null,
+          percentComplete: updatedTask.percentComplete ?? 0
         });
         await reloadCurrentUserData();
       } catch (error) {
@@ -929,7 +945,13 @@ function App() {
         seq,
         duration,
         startTime,
-        endTime
+        endTime,
+        actualStart: null,
+        actualEnd: null,
+        actualDuration: null,
+        actualSequence: null,
+        actualResource: '',
+        percentComplete: 0
       });
     });
 
@@ -947,6 +969,12 @@ function App() {
           duration: task.duration || 0,
           startTime: task.startTime ? new Date(task.startTime).toISOString() : '',
           endTime: task.endTime ? new Date(task.endTime).toISOString() : '',
+          actualStart: task.actualStart ?? null,
+          actualEnd: task.actualEnd ?? null,
+          actualDuration: task.actualDuration ?? null,
+          actualSequence: task.actualSequence ?? null,
+          actualResource: task.actualResource ?? '',
+          percentComplete: task.percentComplete ?? 0,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString()
         });
@@ -1021,7 +1049,11 @@ function App() {
           await tasksAPI.update(String(task.id), {
             seq: task.seq,
             startTime: task.startTime ? new Date(task.startTime).toISOString() : '',
-            endTime: task.endTime ? new Date(task.endTime).toISOString() : ''
+            endTime: task.endTime ? new Date(task.endTime).toISOString() : '',
+            actualStart: task.actualStart ?? null,
+            actualEnd: task.actualEnd ?? null,
+            actualDuration: task.actualDuration ?? null,
+            percentComplete: task.percentComplete ?? 0
           });
         }
         console.log('✅ All tasks updated in database');
@@ -1055,7 +1087,11 @@ function App() {
         await tasksAPI.update(String(updatedTask.id), {
           duration: updatedTask.duration,
           startTime: updatedTask.startTime ? new Date(updatedTask.startTime).toISOString() : '',
-          endTime: updatedTask.endTime ? new Date(updatedTask.endTime).toISOString() : ''
+          endTime: updatedTask.endTime ? new Date(updatedTask.endTime).toISOString() : '',
+          actualStart: updatedTask.actualStart ?? null,
+          actualEnd: updatedTask.actualEnd ?? null,
+          actualDuration: updatedTask.actualDuration ?? null,
+          percentComplete: updatedTask.percentComplete ?? 0
         });
         await reloadCurrentUserData();
       } catch (error) {
@@ -1089,11 +1125,197 @@ function App() {
         await tasksAPI.update(String(updatedTask.id), {
           startTime: updatedTask.startTime ? new Date(updatedTask.startTime).toISOString() : '',
           endTime: updatedTask.endTime ? new Date(updatedTask.endTime).toISOString() : '',
-          duration: updatedTask.duration
+          duration: updatedTask.duration,
+          actualStart: updatedTask.actualStart ?? null,
+          actualEnd: updatedTask.actualEnd ?? null,
+          actualDuration: updatedTask.actualDuration ?? null,
+          percentComplete: updatedTask.percentComplete ?? 0
         });
         await reloadCurrentUserData();
       } catch (error) {
         console.warn('Failed to update task timing in database:', error);
+      }
+    }
+  };
+
+  const handleTaskActualStartChange = async (projectId, taskId, newActualStartString) => {
+    if (!selectedCompanyId || !backendConnected) return;
+
+    const company = companies.find(c => c.id === selectedCompanyId);
+    const project = company?.projects?.find(p => p.id === projectId);
+    const lists = { ...(project?.taskLists || {}) };
+    const found = findTaskInLists(lists, taskId);
+    if (!company || !project || !found) return;
+    const { resourceKey } = found;
+
+    const newValue = newActualStartString ? new Date(newActualStartString).toISOString() : null;
+    lists[resourceKey] = lists[resourceKey].map(t => t.id === taskId ? { ...t, actualStart: newValue } : t);
+    const updatedTask = lists[resourceKey].find(t => t.id === taskId) || null;
+
+    if (updatedTask) {
+      try {
+        await tasksAPI.update(String(updatedTask.id), {
+          actualStart: updatedTask.actualStart ?? null,
+          actualEnd: updatedTask.actualEnd ?? null,
+          actualDuration: updatedTask.actualDuration ?? null,
+          percentComplete: updatedTask.percentComplete ?? 0
+        });
+        await reloadCurrentUserData();
+      } catch (error) {
+        console.warn('Failed to update task actual start in database:', error);
+      }
+    }
+  };
+
+  const handleTaskActualEndChange = async (projectId, taskId, newActualEndString) => {
+    if (!selectedCompanyId || !backendConnected) return;
+
+    const company = companies.find(c => c.id === selectedCompanyId);
+    const project = company?.projects?.find(p => p.id === projectId);
+    const lists = { ...(project?.taskLists || {}) };
+    const found = findTaskInLists(lists, taskId);
+    if (!company || !project || !found) return;
+    const { resourceKey } = found;
+
+    const newValue = newActualEndString ? new Date(newActualEndString).toISOString() : null;
+    lists[resourceKey] = lists[resourceKey].map(t => t.id === taskId ? { ...t, actualEnd: newValue } : t);
+    const updatedTask = lists[resourceKey].find(t => t.id === taskId) || null;
+
+    if (updatedTask) {
+      try {
+        await tasksAPI.update(String(updatedTask.id), {
+          actualStart: updatedTask.actualStart ?? null,
+          actualEnd: updatedTask.actualEnd ?? null,
+          actualDuration: updatedTask.actualDuration ?? null,
+          percentComplete: updatedTask.percentComplete ?? 0
+        });
+        await reloadCurrentUserData();
+      } catch (error) {
+        console.warn('Failed to update task actual end in database:', error);
+      }
+    }
+  };
+
+  const handleTaskActualDurationChange = async (projectId, taskId, newActualDurationRaw) => {
+    if (!selectedCompanyId || !backendConnected) return;
+
+    const company = companies.find(c => c.id === selectedCompanyId);
+    const project = company?.projects?.find(p => p.id === projectId);
+    const lists = { ...(project?.taskLists || {}) };
+    const found = findTaskInLists(lists, taskId);
+    if (!company || !project || !found) return;
+    const { resourceKey } = found;
+
+    const parsed = newActualDurationRaw === '' ? null : parseInt(newActualDurationRaw, 10);
+    const newValue = Number.isNaN(parsed) ? null : parsed;
+    lists[resourceKey] = lists[resourceKey].map(t => t.id === taskId ? { ...t, actualDuration: newValue } : t);
+    const updatedTask = lists[resourceKey].find(t => t.id === taskId) || null;
+
+    if (updatedTask) {
+      try {
+        await tasksAPI.update(String(updatedTask.id), {
+          actualStart: updatedTask.actualStart ?? null,
+          actualEnd: updatedTask.actualEnd ?? null,
+          actualDuration: updatedTask.actualDuration ?? null,
+          percentComplete: updatedTask.percentComplete ?? 0
+        });
+        await reloadCurrentUserData();
+      } catch (error) {
+        console.warn('Failed to update task actual duration in database:', error);
+      }
+    }
+  };
+
+  const handleTaskActualResourceChange = async (projectId, taskId, newActualResource) => {
+    if (!selectedCompanyId || !backendConnected) return;
+
+    const company = companies.find(c => c.id === selectedCompanyId);
+    const project = company?.projects?.find(p => p.id === projectId);
+    const lists = { ...(project?.taskLists || {}) };
+    const found = findTaskInLists(lists, taskId);
+    if (!company || !project || !found) return;
+    const { resourceKey } = found;
+
+    const newValue = (newActualResource ?? '').trim();
+    lists[resourceKey] = lists[resourceKey].map(t => t.id === taskId ? { ...t, actualResource: newValue } : t);
+    const updatedTask = lists[resourceKey].find(t => t.id === taskId) || null;
+
+    if (updatedTask) {
+      try {
+        await tasksAPI.update(String(updatedTask.id), {
+          actualStart: updatedTask.actualStart ?? null,
+          actualEnd: updatedTask.actualEnd ?? null,
+          actualDuration: updatedTask.actualDuration ?? null,
+          actualResource: updatedTask.actualResource ?? '',
+          percentComplete: updatedTask.percentComplete ?? 0
+        });
+        await reloadCurrentUserData();
+      } catch (error) {
+        console.warn('Failed to update task actual resource in database:', error);
+      }
+    }
+  };
+
+  const handleTaskActualSequenceChange = async (projectId, taskId, newActualSequenceRaw) => {
+    if (!selectedCompanyId || !backendConnected) return;
+
+    const company = companies.find(c => c.id === selectedCompanyId);
+    const project = company?.projects?.find(p => p.id === projectId);
+    const lists = { ...(project?.taskLists || {}) };
+    const found = findTaskInLists(lists, taskId);
+    if (!company || !project || !found) return;
+    const { resourceKey } = found;
+
+    const parsed = newActualSequenceRaw === '' ? null : parseInt(newActualSequenceRaw, 10);
+    const newValue = Number.isNaN(parsed) ? null : parsed;
+    lists[resourceKey] = lists[resourceKey].map(t => t.id === taskId ? { ...t, actualSequence: newValue } : t);
+    const updatedTask = lists[resourceKey].find(t => t.id === taskId) || null;
+
+    if (updatedTask) {
+      try {
+        await tasksAPI.update(String(updatedTask.id), {
+          actualStart: updatedTask.actualStart ?? null,
+          actualEnd: updatedTask.actualEnd ?? null,
+          actualDuration: updatedTask.actualDuration ?? null,
+          actualSequence: updatedTask.actualSequence ?? null,
+          actualResource: updatedTask.actualResource ?? '',
+          percentComplete: updatedTask.percentComplete ?? 0
+        });
+        await reloadCurrentUserData();
+      } catch (error) {
+        console.warn('Failed to update task actual sequence in database:', error);
+      }
+    }
+  };
+
+  const handleTaskPercentCompleteChange = async (projectId, taskId, newPercentCompleteRaw) => {
+    if (!selectedCompanyId || !backendConnected) return;
+
+    const company = companies.find(c => c.id === selectedCompanyId);
+    const project = company?.projects?.find(p => p.id === projectId);
+    const lists = { ...(project?.taskLists || {}) };
+    const found = findTaskInLists(lists, taskId);
+    if (!company || !project || !found) return;
+    const { resourceKey } = found;
+
+    const parsed = newPercentCompleteRaw === '' ? 0 : parseInt(newPercentCompleteRaw, 10);
+    const newValue = Number.isNaN(parsed) ? 0 : Math.min(100, Math.max(0, parsed));
+    lists[resourceKey] = lists[resourceKey].map(t => t.id === taskId ? { ...t, percentComplete: newValue } : t);
+    const updatedTask = lists[resourceKey].find(t => t.id === taskId) || null;
+
+    if (updatedTask) {
+      try {
+        await tasksAPI.update(String(updatedTask.id), {
+          actualStart: updatedTask.actualStart ?? null,
+          actualEnd: updatedTask.actualEnd ?? null,
+          actualDuration: updatedTask.actualDuration ?? null,
+          actualSequence: updatedTask.actualSequence ?? null,
+          actualResource: updatedTask.actualResource ?? '',
+          percentComplete: updatedTask.percentComplete ?? 0
+        });
+        await reloadCurrentUserData();
+      } catch (error) {
+        console.warn('Failed to update task percent complete in database:', error);
       }
     }
   };
@@ -1378,66 +1600,126 @@ function App() {
                           if (resourceKeys.length === 0) return <div style={{ color: '#666' }}>No tasks</div>;
                           return resourceKeys.map(resourceKey => (
                             <div key={resourceKey || '__unassigned__'} style={{ marginBottom: '12px' }}>
-                              <h3 style={{ margin: '6px 0' }}>Resource: {resourceKey || '(Unassigned)'}</h3>
+                              <div style={{ margin: '6px 0', fontSize: '0.95em', fontWeight: '600', color: '#333' }}>Resource: {resourceKey || '(Unassigned)'}</div>
                               <ul>
                                 {lists[resourceKey]
                                   .slice()
                                   .sort((a, b) => (a.seq || 0) - (b.seq || 0) || (a.id - b.id))
-                                  .map(task => (
-                                    <li key={task.id} style={{ marginBottom: '12px', paddingBottom: '8px', borderBottom: '1px solid #333' }}>
-                                      <div style={{ marginBottom: '6px', display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
-                                        <span style={{ fontSize: '0.9em', fontWeight: 'bold' }}>Seq:</span>
-                                        <SeqNumberInput
-                                          value={task.seq !== undefined && task.seq !== null ? task.seq : 0}
-                                          onCommit={val => handleTaskSeqChange(project.id, task.id, val)}
-                                          style={{ width: '60px', padding: '8px', border: '2px solid #4CAF50', borderRadius: '4px', fontSize: '1em', backgroundColor: '#fff', color: '#000', cursor: 'text', boxSizing: 'border-box' }}
-                                        />
-                                        <strong style={{ color: (project.endDate && task.endTime && (new Date(task.endTime).getTime() > new Date(project.endDate).getTime())) ? 'crimson' : undefined }}>{task.name}</strong>
-                                        <span style={{ fontSize: '0.8em', color: '#666' }}>
-                                          (Task ID: {task.id})
-                                        </span>
-                                      </div>
-
-                                      <div style={{ marginTop: '6px', fontSize: '0.95em', color: '#555' }}>
-                                        Start:
-                                        <input
-                                          type="datetime-local"
-                                          value={task.startTime ? new Date(task.startTime).toISOString().slice(0, 16) : ''}
-                                          onChange={e => handleTaskStartTimeChange(project.id, task.id, e.target.value)}
-                                          style={{ margin: '0 6px', width: '160px' }}
-                                        />
-                                        {formatDateTime(task.startTime)} |
-                                        Duration:
-                                        <input
-                                          type="number"
-                                          min="1"
-                                          value={task.duration}
-                                          onChange={e => handleTaskDurationChange(project.id, task.id, e.target.value)}
-                                          style={{ width: '60px', margin: '0 6px' }}
-                                        />
-                                        h | End: {formatDateTime(task.endTime)}
-                                      </div>
-
-                                      <div style={{ marginTop: '6px' }}>
-                                        Resource:
-                                        <input
-                                          type="text"
-                                          value={task.resource || ''}
-                                          onChange={e => handleTaskResourceChange(project.id, task.id, e.target.value)}
-                                          style={{ marginLeft: '8px', width: '180px' }}
-                                        />
-                                      </div>
-
-                                      <button style={{ marginLeft: '10px', marginTop: '6px' }} onClick={() => handleDeleteTask(project.id, task.id)}>
-                                        Delete Task
-                                      </button>
-                                      {project.endDate && task.endTime && (new Date(task.endTime).getTime() > new Date(project.endDate).getTime()) && (
-                                        <div style={{ color: 'crimson', marginTop: '6px', fontSize: '0.9em' }}>
-                                          Task exceeds project end date! Either extend project or remove tasks.
+                                  .map(task => {
+                                    const completionPercent = Math.min(100, Math.max(0, Number(task.percentComplete ?? 0)));
+                                    const isComplete = completionPercent >= 100;
+                                    const taskTitle = task.name || task.title || 'Untitled Task';
+                                    return (
+                                      <li key={task.id} style={{ marginBottom: '12px', paddingBottom: '8px', borderBottom: '1px solid #333' }}>
+                                        <div style={{ marginBottom: '6px', display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                                          <span style={{ fontSize: '0.9em', fontWeight: 'bold' }}>Seq:</span>
+                                          <SeqNumberInput
+                                            value={task.seq !== undefined && task.seq !== null ? task.seq : 0}
+                                            onCommit={val => handleTaskSeqChange(project.id, task.id, val)}
+                                            style={{ width: '60px', padding: '8px', border: '2px solid #4CAF50', borderRadius: '4px', fontSize: '1em', backgroundColor: '#fff', color: '#000', cursor: 'text', boxSizing: 'border-box' }}
+                                          />
+                                          <strong style={{ color: (project.endDate && task.endTime && (new Date(task.endTime).getTime() > new Date(project.endDate).getTime())) ? 'crimson' : undefined }}>{taskTitle}</strong>
+                                          <span style={{ fontSize: '0.8em', color: '#666' }}>
+                                            (Task ID: {task.id})
+                                          </span>
+                                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '0.8em', color: isComplete ? '#2e7d32' : '#4CAF50', fontWeight: '600' }}>
+                                            {isComplete ? 'Completed' : `${completionPercent}%`}
+                                            <span style={{ display: 'inline-block', width: '90px', height: '8px', backgroundColor: '#e0e0e0', borderRadius: '999px', overflow: 'hidden' }}>
+                                              <span style={{ display: 'block', width: `${completionPercent}%`, height: '100%', backgroundColor: isComplete ? '#2e7d32' : '#4CAF50' }} />
+                                            </span>
+                                          </span>
                                         </div>
-                                      )}
-                                    </li>
-                                  ))}
+
+                                        <div style={{ marginTop: '6px', fontSize: '0.95em', color: '#555' }}>
+                                          Start:
+                                          <input
+                                            type="datetime-local"
+                                            value={task.startTime ? new Date(task.startTime).toISOString().slice(0, 16) : ''}
+                                            onChange={e => handleTaskStartTimeChange(project.id, task.id, e.target.value)}
+                                            style={{ margin: '0 6px', width: '160px' }}
+                                          />
+                                          {formatDateTime(task.startTime)} |
+                                          Duration:
+                                          <input
+                                            type="number"
+                                            min="1"
+                                            value={task.duration}
+                                            onChange={e => handleTaskDurationChange(project.id, task.id, e.target.value)}
+                                            style={{ width: '60px', margin: '0 6px' }}
+                                          />
+                                          h | End: {formatDateTime(task.endTime)}
+                                        </div>
+
+                                        <div style={{ marginTop: '6px', fontSize: '0.95em', color: '#555', display: 'flex', flexWrap: 'wrap', gap: '10px', alignItems: 'center' }}>
+                                          Actual Start:
+                                          <input
+                                            type="datetime-local"
+                                            value={task.actualStart ? new Date(task.actualStart).toISOString().slice(0, 16) : ''}
+                                            onChange={e => handleTaskActualStartChange(project.id, task.id, e.target.value)}
+                                            style={{ width: '170px' }}
+                                          />
+                                          Actual End:
+                                          <input
+                                            type="datetime-local"
+                                            value={task.actualEnd ? new Date(task.actualEnd).toISOString().slice(0, 16) : ''}
+                                            onChange={e => handleTaskActualEndChange(project.id, task.id, e.target.value)}
+                                            style={{ width: '170px' }}
+                                          />
+                                          Actual Duration:
+                                          <input
+                                            type="number"
+                                            min="0"
+                                            value={task.actualDuration ?? ''}
+                                            onChange={e => handleTaskActualDurationChange(project.id, task.id, e.target.value)}
+                                            style={{ width: '80px' }}
+                                          />
+                                          Actual Sequence:
+                                          <input
+                                            type="number"
+                                            min="0"
+                                            value={task.actualSequence ?? ''}
+                                            onChange={e => handleTaskActualSequenceChange(project.id, task.id, e.target.value)}
+                                            style={{ width: '80px' }}
+                                          />
+                                          Actual Resource:
+                                          <input
+                                            type="text"
+                                            value={task.actualResource ?? ''}
+                                            onChange={e => handleTaskActualResourceChange(project.id, task.id, e.target.value)}
+                                            style={{ width: '140px' }}
+                                          />
+                                          % Complete:
+                                          <input
+                                            type="number"
+                                            min="0"
+                                            max="100"
+                                            value={task.percentComplete ?? 0}
+                                            onChange={e => handleTaskPercentCompleteChange(project.id, task.id, e.target.value)}
+                                            style={{ width: '80px' }}
+                                          />
+                                        </div>
+
+                                        <div style={{ marginTop: '6px' }}>
+                                          Resource:
+                                          <input
+                                            type="text"
+                                            value={task.resource || ''}
+                                            onChange={e => handleTaskResourceChange(project.id, task.id, e.target.value)}
+                                            style={{ marginLeft: '8px', width: '180px' }}
+                                          />
+                                        </div>
+
+                                        <button style={{ marginLeft: '10px', marginTop: '6px' }} onClick={() => handleDeleteTask(project.id, task.id)}>
+                                          Delete Task
+                                        </button>
+                                        {project.endDate && task.endTime && (new Date(task.endTime).getTime() > new Date(project.endDate).getTime()) && (
+                                          <div style={{ color: 'crimson', marginTop: '6px', fontSize: '0.9em' }}>
+                                            Task exceeds project end date! Either extend project or remove tasks.
+                                          </div>
+                                        )}
+                                      </li>
+                                    );
+                                  })}
                               </ul>
                             </div>
                           ));
