@@ -762,6 +762,27 @@ function App() {
     await reloadCurrentUserData();
   };
 
+  const handleCopyProjectData = async (projectId) => {
+    if (!backendConnected || !selectedCompanyId) return;
+
+    const tasks = await tasksAPI.getByProjectId(String(projectId));
+    await Promise.all((tasks || []).map(async task => {
+      const result = await tasksAPI.update(String(task.id), {
+        actualResource: task.resource,
+        actualSequence: task.seq,
+        actualDuration: task.duration,
+        actualStart: task.startTime,
+        actualEnd: task.endTime
+      });
+
+      if (!result) {
+        throw new Error(`Failed to copy data for task ${task.id}`);
+      }
+    }));
+
+    await reloadCurrentUserData();
+  };
+
   const handleProjectStartDateChange = async (projectId, dateString) => {
     if (!dateString || !selectedCompanyId) return;
     const company = companies.find(c => c.id === selectedCompanyId);
@@ -1524,6 +1545,9 @@ function App() {
                         </span>
                         <button style={{ marginLeft: '10px' }} onClick={() => handleDeleteProject(project.id)}>
                           Delete Project
+                        </button>
+                        <button style={{ marginLeft: '10px' }} onClick={() => handleCopyProjectData(project.id)}>
+                          Copy Data
                         </button>
                       </h2>
 
