@@ -73,14 +73,19 @@ function App() {
   const [backendConnected, setBackendConnected] = useState(false);
   const [view, setView] = useState('main'); // 'main' or 'admin'
 
+  const getEffectiveResource = task => task.actualResource ?? task.resource ?? '';
+  const getEffectiveSequence = task => task.actualSequence ?? task.seq ?? 0;
+  const getEffectiveDuration = task => task.actualDuration ?? task.duration ?? 0;
+  const getEffectiveEnd = task => task.actualEnd ?? task.endTime ?? '';
+
   const groupTasksByResource = (tasks = []) => {
     return tasks.reduce((acc, task) => {
-      const resourceKey = task.resource || '';
+      const resourceKey = getEffectiveResource(task);
       if (!acc[resourceKey]) acc[resourceKey] = [];
       acc[resourceKey].push({
         id: task.id,
         name: task.name,
-        resource: resourceKey,
+        resource: task.resource || '',
         seq: task.seq || 0,
         duration: task.duration || 0,
         startTime: task.startTime || '',
@@ -92,7 +97,7 @@ function App() {
         actualResource: task.actualResource ?? '',
         percentComplete: task.percentComplete ?? 0
       });
-      acc[resourceKey].sort((a, b) => (a.seq || 0) - (b.seq || 0) || String(a.id).localeCompare(String(b.id)));
+      acc[resourceKey].sort((a, b) => getEffectiveSequence(a) - getEffectiveSequence(b) || String(a.id).localeCompare(String(b.id)));
       return acc;
     }, {});
   };
@@ -277,6 +282,13 @@ function App() {
   const formatDateTime = (date) => {
     if (!date) return '—';
     return new Date(date).toLocaleString();
+  };
+
+  const formatDateTimeLocal = (date) => {
+    if (!date) return '';
+    const value = new Date(date);
+    const pad = number => String(number).padStart(2, '0');
+    return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}T${pad(value.getHours())}:${pad(value.getMinutes())}`;
   };
 
   // --- Authentication functions ---
@@ -788,15 +800,60 @@ function App() {
     const company = companies.find(c => c.id === selectedCompanyId);
     const project = company?.projects?.find(p => p.id === projectId);
     if (!company || !project) return;
+    const previousStartDate = project.startDate;
+    const previousEndDate = project.endDate;
     const newStartDate = adjustToWorkStart(new Date(dateString), company.calendar);
     const newEndDate = (!project.endDate || new Date(project.endDate) < newStartDate)
       ? getTwoWeeksFromStart(newStartDate, company.calendar)
       : project.endDate;
-    await schedulesAPI.update(String(projectId), {
-      startDate: new Date(newStartDate).toISOString(),
-      endDate: new Date(newEndDate).toISOString()
-    });
-    await reloadCurrentUserData();
+
+    setCompanies(prev => prev.map(currentCompany => {
+      if (currentCompany.id !== selectedCompanyId) return currentCompany;
+      return {
+        ...currentCompany,
+        projects: (currentCompany.projects || []).map(currentProject => currentProject.id === projectId
+          ? { ...currentProject, startDate: newStartDate.toISOString(), endDate: newEndDate.toISOString() }
+          : currentProject)
+      };
+    }));
+
+    try {
+      const updatedSchedule = await schedulesAPI.update(String(projectId), {
+        startDate: newStartDate.toISOString(),
+        endDate: newEndDate.toISOString()
+      });
+
+      if (!updatedSchedule) throw new Error('Failed to update project start date');
+
+      const taskRows = await tasksAPI.getByProjectId(String(projectId));
+      const taskLists = groupTasksByResource(taskRows || []);
+      const recalculatedTasks = Object.values(taskLists)
+        .flatMap(tasks => recalcResourceList(tasks, 1, newStartDate.toISOString(), company.calendar));
+
+      await Promise.all(recalculatedTasks.map(async task => {
+        const result = await tasksAPI.update(String(task.id), {
+          startTime: task.startTime ? new Date(task.startTime).toISOString() : '',
+          endTime: task.endTime ? new Date(task.endTime).toISOString() : ''
+        });
+
+        if (!result) {
+          throw new Error(`Failed to update schedule time for task ${task.id}`);
+        }
+      }));
+
+      await reloadCurrentUserData();
+    } catch (error) {
+      console.error('Failed to update project start date:', error);
+      setCompanies(prev => prev.map(currentCompany => {
+        if (currentCompany.id !== selectedCompanyId) return currentCompany;
+        return {
+          ...currentCompany,
+          projects: (currentCompany.projects || []).map(currentProject => currentProject.id === projectId
+            ? { ...currentProject, startDate: previousStartDate, endDate: previousEndDate }
+            : currentProject)
+        };
+      }));
+    }
   };
 
   const handleProjectEndDateChange = async (projectId, dateString) => {
@@ -902,27 +959,27 @@ function App() {
   // Recalculate tasks within a single resource list, for seq >= threshold.
   // If there are earlier tasks in the list, base on their endTime; otherwise use projectStartDate or now.
   const recalcResourceList = (tasks = [], threshold = 1, projectStartDate = null, calendar = null) => {
-    const earlier = (tasks || []).filter(t => (t.seq || 0) < threshold)
-      .sort((a, b) => (a.seq || 0) - (b.seq || 0) || (a.id - b.id));
+    const earlier = (tasks || []).filter(t => getEffectiveSequence(t) < threshold)
+      .sort((a, b) => getEffectiveSequence(a) - getEffectiveSequence(b) || String(a.id).localeCompare(String(b.id)));
 
     let baseStart;
     if (earlier.length) {
-      baseStart = new Date(earlier[earlier.length - 1].endTime);
+      baseStart = new Date(getEffectiveEnd(earlier[earlier.length - 1]));
     } else if (projectStartDate) {
       baseStart = adjustToWorkStart(projectStartDate, calendar);
     } else {
       baseStart = adjustToWorkStart(new Date(), calendar);
     }
 
-    const toRecalc = (tasks || []).filter(t => (t.seq || 0) >= threshold)
-      .sort((a, b) => (a.seq || 0) - (b.seq || 0) || (a.id - b.id));
+    const toRecalc = (tasks || []).filter(t => getEffectiveSequence(t) >= threshold)
+      .sort((a, b) => getEffectiveSequence(a) - getEffectiveSequence(b) || String(a.id).localeCompare(String(b.id)));
 
     const recalcedMap = {};
     let cursor = adjustToWorkStart(baseStart, calendar);
     for (const t of toRecalc) {
-      const start = adjustToWorkStart(cursor, calendar);
-      const dur = parseInt(t.duration, 10) || 0;
-      const end = addWorkingHours(start, dur, calendar);
+      const start = t.actualStart ? new Date(t.actualStart) : adjustToWorkStart(cursor, calendar);
+      const dur = parseInt(getEffectiveDuration(t), 10) || 0;
+      const end = t.actualEnd ? new Date(t.actualEnd) : addWorkingHours(start, dur, calendar);
       recalcedMap[t.id] = { ...t, startTime: start, endTime: end };
       cursor = new Date(end);
     }
@@ -1040,7 +1097,7 @@ function App() {
     }
     const { resourceKey } = found;
 
-    const oldSeq = found.task ? (found.task.seq || 0) : 0;
+    const oldSeq = found.task ? getEffectiveSequence(found.task) : 0;
     // Bias the edited task just before (moving earlier) or just after (moving later)
     // the task currently occupying newSeq, then renumber everyone to a clean
     // contiguous 1..N. This shifts the displaced tasks instead of creating a
@@ -1099,7 +1156,7 @@ function App() {
 
     lists[resourceKey] = lists[resourceKey].map(t => t.id === taskId ? { ...t, duration: newDuration } : t);
     const edited = lists[resourceKey].find(t => t.id === taskId);
-    const threshold = edited.seq || 0;
+    const threshold = getEffectiveSequence(edited);
     lists[resourceKey] = recalcResourceList(lists[resourceKey], threshold, project.startDate, company.calendar);
     updatedTask = lists[resourceKey].find(t => t.id === taskId) || null;
 
@@ -1131,30 +1188,53 @@ function App() {
     const found = findTaskInLists(lists, taskId);
     if (!company || !project || !found) return;
     const { resourceKey, task } = found;
+    const previousTaskLists = project.taskLists;
 
     const newStartTime = adjustToWorkStart(new Date(newStartTimeString), company.calendar);
-    const newDuration = task.duration || 0;
+    const newDuration = getEffectiveDuration(task);
     const newEndTime = addWorkingHours(newStartTime, newDuration, company.calendar);
 
     lists[resourceKey] = lists[resourceKey].map(t => t.id === taskId ? { ...t, startTime: newStartTime, endTime: newEndTime } : t);
-    const threshold = (task.seq || 0) + 1;
+    const threshold = getEffectiveSequence(task) + 1;
     lists[resourceKey] = recalcResourceList(lists[resourceKey], threshold, project.startDate, company.calendar);
     updatedTask = lists[resourceKey].find(t => t.id === taskId) || null;
 
     if (updatedTask) {
+      setCompanies(prev => prev.map(currentCompany => {
+        if (currentCompany.id !== selectedCompanyId) return currentCompany;
+        return {
+          ...currentCompany,
+          projects: (currentCompany.projects || []).map(currentProject => currentProject.id === projectId
+            ? { ...currentProject, taskLists: lists }
+            : currentProject)
+        };
+      }));
+
       try {
-        await tasksAPI.update(String(updatedTask.id), {
-          startTime: updatedTask.startTime ? new Date(updatedTask.startTime).toISOString() : '',
-          endTime: updatedTask.endTime ? new Date(updatedTask.endTime).toISOString() : '',
-          duration: updatedTask.duration,
-          actualStart: updatedTask.actualStart ?? null,
-          actualEnd: updatedTask.actualEnd ?? null,
-          actualDuration: updatedTask.actualDuration ?? null,
-          percentComplete: updatedTask.percentComplete ?? 0
-        });
-        await reloadCurrentUserData();
+        await Promise.all(lists[resourceKey].map(async taskToUpdate => {
+          const result = await tasksAPI.update(String(taskToUpdate.id), {
+            startTime: taskToUpdate.startTime ? new Date(taskToUpdate.startTime).toISOString() : '',
+            endTime: taskToUpdate.endTime ? new Date(taskToUpdate.endTime).toISOString() : '',
+            duration: taskToUpdate.duration,
+            actualStart: taskToUpdate.actualStart ?? null,
+            actualEnd: taskToUpdate.actualEnd ?? null,
+            actualDuration: taskToUpdate.actualDuration ?? null,
+            percentComplete: taskToUpdate.percentComplete ?? 0
+          });
+
+          if (!result) throw new Error(`Failed to update task ${taskToUpdate.id}`);
+        }));
       } catch (error) {
         console.warn('Failed to update task timing in database:', error);
+        setCompanies(prev => prev.map(currentCompany => {
+          if (currentCompany.id !== selectedCompanyId) return currentCompany;
+          return {
+            ...currentCompany,
+            projects: (currentCompany.projects || []).map(currentProject => currentProject.id === projectId
+              ? { ...currentProject, taskLists: previousTaskLists }
+              : currentProject)
+          };
+        }));
       }
     }
   };
@@ -1557,7 +1637,7 @@ function App() {
                             Project Start Date:
                             <input
                               type="datetime-local"
-                              value={project.startDate ? new Date(project.startDate).toISOString().slice(0, 16) : ''}
+                              value={formatDateTimeLocal(project.startDate)}
                               onChange={e => handleProjectStartDateChange(project.id, e.target.value)}
                               style={{ margin: '0 6px', width: '160px' }}
                             />
@@ -1658,7 +1738,7 @@ function App() {
                                           Start:
                                           <input
                                             type="datetime-local"
-                                            value={task.startTime ? new Date(task.startTime).toISOString().slice(0, 16) : ''}
+                                            value={formatDateTimeLocal(task.startTime)}
                                             onChange={e => handleTaskStartTimeChange(project.id, task.id, e.target.value)}
                                             style={{ margin: '0 6px', width: '160px' }}
                                           />
