@@ -142,6 +142,21 @@ function App() {
   const getEffectiveStart = task => task.actualStart ?? task.startTime ?? '';
   const getEffectiveDuration = task => task.actualDuration ?? task.duration ?? 0;
   const getEffectiveEnd = task => task.actualEnd ?? task.endTime ?? '';
+  const comparePlannedTaskOrder = (a, b) => {
+    const sequenceDifference = (a.seq ?? 0) - (b.seq ?? 0);
+    if (sequenceDifference) return sequenceDifference;
+
+    const startA = a.startTime || '';
+    const startB = b.startTime || '';
+    if (startA && !startB) return -1;
+    if (!startA && startB) return 1;
+    if (startA && startB) {
+      const startDifference = new Date(startA).getTime() - new Date(startB).getTime();
+      if (Number.isFinite(startDifference) && startDifference) return startDifference;
+    }
+
+    return String(a.id).localeCompare(String(b.id));
+  };
   const compareTaskOrder = (a, b) => {
     const sequenceDifference = getEffectiveSequence(a) - getEffectiveSequence(b);
     if (sequenceDifference) return sequenceDifference;
@@ -160,7 +175,7 @@ function App() {
 
   const groupTasksByResource = (tasks = []) => {
     return tasks.reduce((acc, task) => {
-      const resourceKey = getEffectiveResource(task);
+      const resourceKey = task.resource || '';
       if (!acc[resourceKey]) acc[resourceKey] = [];
       acc[resourceKey].push({
         id: task.id,
@@ -177,7 +192,7 @@ function App() {
         actualResource: task.actualResource ?? '',
         percentComplete: task.percentComplete ?? 0
       });
-      acc[resourceKey].sort(compareTaskOrder);
+      acc[resourceKey].sort(comparePlannedTaskOrder);
       return acc;
     }, {});
   };
@@ -1073,30 +1088,30 @@ function App() {
     }
   };
 
-  // Recalculate tasks within a single resource list, for seq >= threshold.
-  // If there are earlier tasks in the list, base on their endTime; otherwise use projectStartDate or now.
+  // Recalculate planned dates within a resource list, without using actual task values.
   const recalcResourceList = (tasks = [], threshold = 1, projectStartDate = null, calendar = null) => {
-    const earlier = (tasks || []).filter(t => getEffectiveSequence(t) < threshold)
-      .sort(compareTaskOrder);
+    const earlier = (tasks || []).filter(t => (t.seq ?? 0) < threshold)
+      .sort(comparePlannedTaskOrder);
 
     let baseStart;
     if (earlier.length) {
-      baseStart = new Date(getEffectiveEnd(earlier[earlier.length - 1]));
+      const previousEnd = earlier[earlier.length - 1].endTime;
+      baseStart = previousEnd ? new Date(previousEnd) : projectStartDate || new Date();
     } else if (projectStartDate) {
       baseStart = adjustToWorkStart(projectStartDate, calendar);
     } else {
       baseStart = adjustToWorkStart(new Date(), calendar);
     }
 
-    const toRecalc = (tasks || []).filter(t => getEffectiveSequence(t) >= threshold)
-      .sort(compareTaskOrder);
+    const toRecalc = (tasks || []).filter(t => (t.seq ?? 0) >= threshold)
+      .sort(comparePlannedTaskOrder);
 
     const recalcedMap = {};
     let cursor = adjustToWorkStart(baseStart, calendar);
     for (const t of toRecalc) {
-      const start = t.actualStart ? new Date(t.actualStart) : adjustToWorkStart(cursor, calendar);
-      const dur = parseInt(getEffectiveDuration(t), 10) || 0;
-      const end = t.actualEnd ? new Date(t.actualEnd) : addWorkingHours(start, dur, calendar);
+      const start = adjustToWorkStart(cursor, calendar);
+      const dur = parseInt(t.duration, 10) || 0;
+      const end = addWorkingHours(start, dur, calendar);
       recalcedMap[t.id] = { ...t, startTime: start, endTime: end };
       cursor = new Date(end);
     }
@@ -1273,7 +1288,7 @@ function App() {
 
     lists[resourceKey] = lists[resourceKey].map(t => t.id === taskId ? { ...t, duration: newDuration } : t);
     const edited = lists[resourceKey].find(t => t.id === taskId);
-    const threshold = getEffectiveSequence(edited);
+    const threshold = edited.seq ?? 0;
     lists[resourceKey] = recalcResourceList(lists[resourceKey], threshold, project.startDate, company.calendar);
     updatedTask = lists[resourceKey].find(t => t.id === taskId) || null;
 
@@ -1308,11 +1323,11 @@ function App() {
     const previousTaskLists = project.taskLists;
 
     const newStartTime = adjustToWorkStart(new Date(newStartTimeString), company.calendar);
-    const newDuration = getEffectiveDuration(task);
+    const newDuration = task.duration;
     const newEndTime = addWorkingHours(newStartTime, newDuration, company.calendar);
 
     lists[resourceKey] = lists[resourceKey].map(t => t.id === taskId ? { ...t, startTime: newStartTime, endTime: newEndTime } : t);
-    const threshold = getEffectiveSequence(task) + 1;
+    const threshold = (task.seq ?? 0) + 1;
     lists[resourceKey] = recalcResourceList(lists[resourceKey], threshold, project.startDate, company.calendar);
     updatedTask = lists[resourceKey].find(t => t.id === taskId) || null;
 
@@ -1364,10 +1379,21 @@ function App() {
     const lists = { ...(project?.taskLists || {}) };
     const found = findTaskInLists(lists, taskId);
     if (!company || !project || !found) return;
-    const { resourceKey } = found;
+    const { resourceKey, task } = found;
 
     const newValue = newActualStartString ? new Date(newActualStartString).toISOString() : null;
-    lists[resourceKey] = lists[resourceKey].map(t => t.id === taskId ? { ...t, actualStart: newValue } : t);
+    let actualEnd = task.actualEnd ?? null;
+    if (newValue && task.actualDuration != null && task.actualDuration !== '') {
+      const actualDuration = Number(task.actualDuration);
+      if (Number.isFinite(actualDuration) && actualDuration >= 0) {
+        actualEnd = actualDuration === 0
+          ? newValue
+          : addWorkingHours(new Date(newValue), actualDuration, company.calendar).toISOString();
+      }
+    }
+    lists[resourceKey] = lists[resourceKey].map(t => t.id === taskId
+      ? { ...t, actualStart: newValue, actualEnd }
+      : t);
     const updatedTask = lists[resourceKey].find(t => t.id === taskId) || null;
 
     if (updatedTask) {
@@ -1393,10 +1419,26 @@ function App() {
     const lists = { ...(project?.taskLists || {}) };
     const found = findTaskInLists(lists, taskId);
     if (!company || !project || !found) return;
-    const { resourceKey } = found;
+    const { resourceKey, task } = found;
 
     const newValue = newActualEndString ? new Date(newActualEndString).toISOString() : null;
-    lists[resourceKey] = lists[resourceKey].map(t => t.id === taskId ? { ...t, actualEnd: newValue } : t);
+    let actualDuration = task.actualDuration ?? null;
+    if (newValue && task.actualStart) {
+      try {
+        actualDuration = company.calendar.workingHoursBetween(task.actualStart, newValue);
+      } catch (error) {
+        if (error instanceof RangeError) {
+          alert(error.message);
+          return;
+        }
+        throw error;
+      }
+    } else if (!newValue) {
+      actualDuration = null;
+    }
+    lists[resourceKey] = lists[resourceKey].map(t => t.id === taskId
+      ? { ...t, actualEnd: newValue, actualDuration }
+      : t);
     const updatedTask = lists[resourceKey].find(t => t.id === taskId) || null;
 
     if (updatedTask) {
@@ -1424,9 +1466,19 @@ function App() {
     if (!company || !project || !found) return;
     const { resourceKey } = found;
 
-    const parsed = newActualDurationRaw === '' ? null : parseInt(newActualDurationRaw, 10);
-    const newValue = Number.isNaN(parsed) ? null : parsed;
-    lists[resourceKey] = lists[resourceKey].map(t => t.id === taskId ? { ...t, actualDuration: newValue } : t);
+    const parsed = newActualDurationRaw === '' ? null : Number(newActualDurationRaw);
+    const newValue = parsed == null || !Number.isFinite(parsed) ? null : parsed;
+    if (newValue != null && newValue < 0) return;
+    const task = found.task;
+    let actualEnd = task.actualEnd ?? null;
+    if (newValue != null && task.actualStart) {
+      actualEnd = newValue === 0
+        ? task.actualStart
+        : addWorkingHours(new Date(task.actualStart), newValue, company.calendar).toISOString();
+    }
+    lists[resourceKey] = lists[resourceKey].map(t => t.id === taskId
+      ? { ...t, actualDuration: newValue, actualEnd }
+      : t);
     const updatedTask = lists[resourceKey].find(t => t.id === taskId) || null;
 
     if (updatedTask) {
@@ -1825,7 +1877,7 @@ function App() {
                           return resourceKeys.map(resourceKey => (
                             <div key={resourceKey || '__unassigned__'} style={{ marginBottom: '12px' }}>
                               {!hiddenPlannedProjects[project.id] && (
-                                <div style={{ margin: '6px 0', fontSize: '0.95em', fontWeight: '600', color: '#333' }}>Resource: {resourceKey || '(Unassigned)'}</div>
+                                <div style={{ margin: '6px 0', fontSize: '0.95em', fontWeight: '600', color: '#fff' }}>Resource: {resourceKey || '(Unassigned)'}</div>
                               )}
                               <ul>
                                 {lists[resourceKey]
@@ -1886,14 +1938,14 @@ function App() {
                                           Actual Start:
                                           <input
                                             type="datetime-local"
-                                            value={task.actualStart ? new Date(task.actualStart).toISOString().slice(0, 16) : ''}
+                                            value={formatDateTimeLocal(task.actualStart)}
                                             onChange={e => handleTaskActualStartChange(project.id, task.id, e.target.value)}
                                             style={{ width: '170px' }}
                                           />
                                           Actual End:
                                           <input
                                             type="datetime-local"
-                                            value={task.actualEnd ? new Date(task.actualEnd).toISOString().slice(0, 16) : ''}
+                                            value={formatDateTimeLocal(task.actualEnd)}
                                             onChange={e => handleTaskActualEndChange(project.id, task.id, e.target.value)}
                                             style={{ width: '170px' }}
                                           />
@@ -1901,6 +1953,7 @@ function App() {
                                           <input
                                             type="number"
                                             min="0"
+                                            step="any"
                                             value={task.actualDuration ?? ''}
                                             onChange={e => handleTaskActualDurationChange(project.id, task.id, e.target.value)}
                                             style={{ width: '80px' }}

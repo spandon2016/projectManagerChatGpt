@@ -86,6 +86,33 @@ class Calendar {
     return cursor;
   }
 
+  workingHoursBetween(startDate, endDate) {
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+    if (isNaN(start.getTime()) || isNaN(end.getTime()) || end < start) {
+      throw new RangeError('End date must be valid and no earlier than start date');
+    }
+
+    let totalMilliseconds = 0;
+    const day = new Date(start);
+    day.setUTCHours(0, 0, 0, 0);
+
+    while (day <= end) {
+      const dayOfWeek = day.getUTCDay();
+      const dateKey = Calendar.toDateKey(day);
+      if (dayOfWeek !== 0 && dayOfWeek !== 6 && !this.nonWorkingDays.has(dateKey)) {
+        const workStart = this.setToWorkStart(day).getTime();
+        const workEnd = this.setToWorkEnd(day).getTime();
+        const overlapStart = Math.max(start.getTime(), workStart);
+        const overlapEnd = Math.min(end.getTime(), workEnd);
+        totalMilliseconds += Math.max(0, overlapEnd - overlapStart);
+      }
+      day.setUTCDate(day.getUTCDate() + 1);
+    }
+
+    return Math.round((totalMilliseconds / 3600000) * 100) / 100;
+  }
+
   addNonWorkingDay(date) {
     const key = Calendar.toDateKey(date);
     if (!key) return false;
