@@ -541,6 +541,55 @@ app.post('/api/tasks', (req, res) => {
   );
 });
 
+// Update multiple tasks atomically
+app.put('/api/tasks/bulk', (req, res) => {
+  const { tasks } = req.body;
+  if (!Array.isArray(tasks) || tasks.length === 0 || tasks.some(task => !task || !task.id)) {
+    return res.status(400).json({ error: 'A non-empty list of tasks with IDs is required' });
+  }
+
+  const taskIds = tasks.map(task => String(task.id));
+  if (new Set(taskIds).size !== taskIds.length) {
+    return res.status(400).json({ error: 'Task IDs must be unique' });
+  }
+
+  const updateTask = index => {
+    if (index === tasks.length) {
+      return db.run('COMMIT', err => {
+        if (err) {
+          return db.run('ROLLBACK', () => res.status(500).json({ error: err.message }));
+        }
+        res.json({ success: true, updatedCount: tasks.length });
+      });
+    }
+
+    const task = tasks[index];
+    db.run(
+      `UPDATE tasks SET resource = ?, seq = ?, duration = ?, startTime = ?, endTime = ?, actualStart = ?, actualEnd = ?, actualDuration = ?, actualSequence = ?, actualResource = ?, percentComplete = ?, updatedAt = ? WHERE id = ?`,
+      [
+        task.resource ?? '', task.seq ?? 0, task.duration ?? 0,
+        task.startTime ?? '', task.endTime ?? '', task.actualStart ?? null,
+        task.actualEnd ?? null, task.actualDuration ?? null,
+        task.actualSequence ?? null, task.actualResource || null,
+        task.percentComplete ?? 0, new Date().toISOString(), String(task.id)
+      ],
+      function(err) {
+        if (err || this.changes === 0) {
+          return db.run('ROLLBACK', () => res.status(err ? 500 : 404).json({
+            error: err ? err.message : `Task ${task.id} not found`
+          }));
+        }
+        updateTask(index + 1);
+      }
+    );
+  };
+
+  db.run('BEGIN TRANSACTION', err => {
+    if (err) return res.status(500).json({ error: err.message });
+    updateTask(0);
+  });
+});
+
 // Update task
 app.put('/api/tasks/:id', (req, res) => {
   const { id } = req.params;

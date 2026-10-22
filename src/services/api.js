@@ -374,6 +374,21 @@ export const tasksAPI = {
     }
   },
 
+  async updateMany(tasks) {
+    try {
+      const response = await fetch(`${API_URL}/tasks/bulk`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tasks })
+      });
+      if (!response.ok) throw new Error('Failed to update tasks');
+      return await response.json();
+    } catch (error) {
+      console.error('Error updating tasks:', error);
+      return null;
+    }
+  },
+
   async delete(id) {
     try {
       const response = await fetch(`${API_URL}/tasks/${id}`, {

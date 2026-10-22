@@ -41,6 +41,69 @@ function SeqNumberInput({ value, onCommit, style }) {
     />
   );
 }
+
+function ResourceTextInput({ value, onCommit, style }) {
+  const [draft, setDraft] = useState(value || '');
+
+  useEffect(() => { setDraft(value || ''); }, [value]);
+
+  const commitNow = () => {
+    const nextValue = draft.trim();
+    if (nextValue !== (value || '')) onCommit(nextValue);
+    else setDraft(value || '');
+  };
+
+  return (
+    <input
+      type="text"
+      value={draft}
+      onChange={e => setDraft(e.target.value)}
+      onBlur={commitNow}
+      onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+      style={style}
+    />
+  );
+}
+
+function ActualSequenceInput({ value, onCommit, style }) {
+  const normalizedValue = value == null ? '' : String(value);
+  const [draft, setDraft] = useState(normalizedValue);
+
+  useEffect(() => { setDraft(normalizedValue); }, [normalizedValue]);
+
+  const commitNow = () => {
+    const trimmedValue = draft.trim();
+    if (trimmedValue === '') {
+      if (normalizedValue !== '') onCommit('');
+      else setDraft(normalizedValue);
+      return;
+    }
+
+    const parsedValue = Number(trimmedValue);
+    if (!Number.isInteger(parsedValue) || parsedValue < 0) {
+      setDraft(normalizedValue);
+      return;
+    }
+
+    const nextValue = String(parsedValue);
+    if (nextValue !== normalizedValue) onCommit(nextValue);
+    else setDraft(normalizedValue);
+  };
+
+  return (
+    <input
+      type="number"
+      min="0"
+      step="1"
+      value={draft}
+      onChange={e => setDraft(e.target.value)}
+      onBlur={commitNow}
+      onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+      style={style}
+    />
+  );
+}
+
 import Company from './models/company';
 import User from './models/user';
 import Calendar from './models/calendar';
@@ -53,6 +116,7 @@ function App() {
   const WORK_HOURS_PER_DAY = WORK_END_HOUR - WORK_START_HOUR;
 
   const [companies, setCompanies] = useState([]);
+  const [hiddenPlannedProjects, setHiddenPlannedProjects] = useState({});
   const [companyName, setCompanyName] = useState('');
   const [editingCompanyId, setEditingCompanyId] = useState(null);
   const [editingCompanyName, setEditingCompanyName] = useState('');
@@ -75,8 +139,24 @@ function App() {
 
   const getEffectiveResource = task => task.actualResource ?? task.resource ?? '';
   const getEffectiveSequence = task => task.actualSequence ?? task.seq ?? 0;
+  const getEffectiveStart = task => task.actualStart ?? task.startTime ?? '';
   const getEffectiveDuration = task => task.actualDuration ?? task.duration ?? 0;
   const getEffectiveEnd = task => task.actualEnd ?? task.endTime ?? '';
+  const compareTaskOrder = (a, b) => {
+    const sequenceDifference = getEffectiveSequence(a) - getEffectiveSequence(b);
+    if (sequenceDifference) return sequenceDifference;
+
+    const startA = getEffectiveStart(a);
+    const startB = getEffectiveStart(b);
+    if (startA && !startB) return -1;
+    if (!startA && startB) return 1;
+    if (startA && startB) {
+      const startDifference = new Date(startA).getTime() - new Date(startB).getTime();
+      if (Number.isFinite(startDifference) && startDifference) return startDifference;
+    }
+
+    return String(a.id).localeCompare(String(b.id));
+  };
 
   const groupTasksByResource = (tasks = []) => {
     return tasks.reduce((acc, task) => {
@@ -97,7 +177,7 @@ function App() {
         actualResource: task.actualResource ?? '',
         percentComplete: task.percentComplete ?? 0
       });
-      acc[resourceKey].sort((a, b) => getEffectiveSequence(a) - getEffectiveSequence(b) || String(a.id).localeCompare(String(b.id)));
+      acc[resourceKey].sort(compareTaskOrder);
       return acc;
     }, {});
   };
@@ -777,22 +857,46 @@ function App() {
   const handleCopyProjectData = async (projectId) => {
     if (!backendConnected || !selectedCompanyId) return;
 
-    const tasks = await tasksAPI.getByProjectId(String(projectId));
-    await Promise.all((tasks || []).map(async task => {
-      const result = await tasksAPI.update(String(task.id), {
-        actualResource: task.resource,
-        actualSequence: task.seq,
-        actualDuration: task.duration,
-        actualStart: task.startTime,
-        actualEnd: task.endTime
-      });
+    try {
+      const tasks = await tasksAPI.getByProjectId(String(projectId));
+      const updates = (tasks || []).map(task => ({
+        id: String(task.id),
+        resource: task.resource || '',
+        seq: task.seq ?? 0,
+        duration: task.duration ?? 0,
+        startTime: task.startTime ? new Date(task.startTime).toISOString() : '',
+        endTime: task.endTime ? new Date(task.endTime).toISOString() : '',
+        actualResource: task.actualResource == null || task.actualResource === '' ? task.resource || '' : task.actualResource,
+        actualSequence: task.actualSequence == null || task.actualSequence === '' ? task.seq ?? null : task.actualSequence,
+        actualDuration: task.actualDuration == null || task.actualDuration === '' ? task.duration ?? null : task.actualDuration,
+        actualStart: task.actualStart == null || task.actualStart === '' ? task.startTime || null : task.actualStart,
+        actualEnd: task.actualEnd == null || task.actualEnd === '' ? task.endTime || null : task.actualEnd,
+        percentComplete: task.percentComplete ?? 0
+      }));
 
-      if (!result) {
-        throw new Error(`Failed to copy data for task ${task.id}`);
+      if (updates.length) {
+        const result = await tasksAPI.updateMany(updates);
+        if (!result) throw new Error('Failed to copy planned values into missing actual fields');
       }
-    }));
 
-    await reloadCurrentUserData();
+      await reloadCurrentUserData();
+      return true;
+    } catch (error) {
+      console.warn('Failed to copy planned task values:', error);
+      alert(`Failed to copy task data: ${error.message}`);
+      return false;
+    }
+  };
+
+  const handleTogglePlannedFields = async (projectId) => {
+    if (hiddenPlannedProjects[projectId]) {
+      setHiddenPlannedProjects(prev => ({ ...prev, [projectId]: false }));
+      return;
+    }
+
+    if (await handleCopyProjectData(projectId)) {
+      setHiddenPlannedProjects(prev => ({ ...prev, [projectId]: true }));
+    }
   };
 
   const handleProjectStartDateChange = async (projectId, dateString) => {
@@ -922,6 +1026,7 @@ function App() {
 
     const { resourceKey: oldKey, task } = found;
     const newKey = (value || '').trim();
+    if (newKey === oldKey) return;
 
     lists[oldKey] = lists[oldKey].filter(t => t.id !== taskId);
     lists[oldKey] = resequenceTasksInList(lists[oldKey]);
@@ -931,28 +1036,40 @@ function App() {
     const maxSeq = lists[newKey].reduce((m, t) => Math.max(m, t.seq || 0), 0);
     const moved = { ...task, resource: newKey, seq: maxSeq + 1 };
     lists[newKey] = [...lists[newKey], moved];
-    lists[newKey] = resequenceTasksInList(lists[newKey]);
-    lists[newKey] = recalcResourceList(lists[newKey], moved.seq || 1, project.startDate, company.calendar);
 
     updatedTask = lists[newKey].find(t => t.id === taskId) || moved;
 
-    if (updatedTask) {
-      try {
-        await tasksAPI.update(String(updatedTask.id), {
-          resource: updatedTask.resource,
-          seq: updatedTask.seq,
-          startTime: updatedTask.startTime ? new Date(updatedTask.startTime).toISOString() : '',
-          endTime: updatedTask.endTime ? new Date(updatedTask.endTime).toISOString() : '',
-          duration: updatedTask.duration,
-          actualStart: updatedTask.actualStart ?? null,
-          actualEnd: updatedTask.actualEnd ?? null,
-          actualDuration: updatedTask.actualDuration ?? null,
-          percentComplete: updatedTask.percentComplete ?? 0
-        });
-        await reloadCurrentUserData();
-      } catch (error) {
-        console.warn('Failed to update task resource in database:', error);
-      }
+    try {
+      const affectedTasks = [...lists[oldKey], ...lists[newKey]].map(taskToSave => ({
+        id: String(taskToSave.id),
+        resource: taskToSave.resource || '',
+        seq: taskToSave.seq || 0,
+        duration: taskToSave.duration || 0,
+        startTime: taskToSave.startTime ? new Date(taskToSave.startTime).toISOString() : '',
+        endTime: taskToSave.endTime ? new Date(taskToSave.endTime).toISOString() : '',
+        actualStart: taskToSave.actualStart ?? null,
+        actualEnd: taskToSave.actualEnd ?? null,
+        actualDuration: taskToSave.actualDuration ?? null,
+        actualSequence: taskToSave.actualSequence ?? null,
+        actualResource: taskToSave.actualResource ?? '',
+        percentComplete: taskToSave.percentComplete ?? 0
+      }));
+      const result = await tasksAPI.updateMany(affectedTasks);
+      if (!result) throw new Error('Failed to persist the updated resource task lists');
+
+      setCompanies(prev => prev.map(currentCompany => {
+        if (currentCompany.id !== selectedCompanyId) return currentCompany;
+        return {
+          ...currentCompany,
+          projects: (currentCompany.projects || []).map(currentProject => currentProject.id === projectId
+            ? { ...currentProject, taskLists: lists }
+            : currentProject)
+        };
+      }));
+      await reloadCurrentUserData();
+    } catch (error) {
+      console.warn('Failed to update task resource in database:', error);
+      alert(`Failed to move task: ${error.message}`);
     }
   };
 
@@ -960,7 +1077,7 @@ function App() {
   // If there are earlier tasks in the list, base on their endTime; otherwise use projectStartDate or now.
   const recalcResourceList = (tasks = [], threshold = 1, projectStartDate = null, calendar = null) => {
     const earlier = (tasks || []).filter(t => getEffectiveSequence(t) < threshold)
-      .sort((a, b) => getEffectiveSequence(a) - getEffectiveSequence(b) || String(a.id).localeCompare(String(b.id)));
+      .sort(compareTaskOrder);
 
     let baseStart;
     if (earlier.length) {
@@ -972,7 +1089,7 @@ function App() {
     }
 
     const toRecalc = (tasks || []).filter(t => getEffectiveSequence(t) >= threshold)
-      .sort((a, b) => getEffectiveSequence(a) - getEffectiveSequence(b) || String(a.id).localeCompare(String(b.id)));
+      .sort(compareTaskOrder);
 
     const recalcedMap = {};
     let cursor = adjustToWorkStart(baseStart, calendar);
@@ -1432,7 +1549,7 @@ function App() {
 
   // Resequence tasks to contiguous seq values within a list
   const resequenceTasksInList = (tasks) => {
-    const sorted = (tasks || []).slice().sort((a, b) => (a.seq || 0) - (b.seq || 0) || (a.id - b.id));
+    const sorted = (tasks || []).slice().sort(compareTaskOrder);
     return sorted.map((t, i) => ({ ...t, seq: i + 1 }));
   };
 
@@ -1629,6 +1746,9 @@ function App() {
                         <button style={{ marginLeft: '10px' }} onClick={() => handleCopyProjectData(project.id)}>
                           Copy Data
                         </button>
+                        <button style={{ marginLeft: '10px' }} onClick={() => handleTogglePlannedFields(project.id)}>
+                          {hiddenPlannedProjects[project.id] ? 'Unhide Planned' : 'Hide Planned'}
+                        </button>
                       </h2>
 
                       <div style={{ marginBottom: '12px', padding: '10px', backgroundColor: '#f5f5f5', borderRadius: '4px' }}>
@@ -1704,11 +1824,13 @@ function App() {
                           if (resourceKeys.length === 0) return <div style={{ color: '#666' }}>No tasks</div>;
                           return resourceKeys.map(resourceKey => (
                             <div key={resourceKey || '__unassigned__'} style={{ marginBottom: '12px' }}>
-                              <div style={{ margin: '6px 0', fontSize: '0.95em', fontWeight: '600', color: '#333' }}>Resource: {resourceKey || '(Unassigned)'}</div>
+                              {!hiddenPlannedProjects[project.id] && (
+                                <div style={{ margin: '6px 0', fontSize: '0.95em', fontWeight: '600', color: '#333' }}>Resource: {resourceKey || '(Unassigned)'}</div>
+                              )}
                               <ul>
                                 {lists[resourceKey]
                                   .slice()
-                                  .sort((a, b) => (a.seq || 0) - (b.seq || 0) || (a.id - b.id))
+                                  .sort(compareTaskOrder)
                                   .map(task => {
                                     const completionPercent = Math.min(100, Math.max(0, Number(task.percentComplete ?? 0)));
                                     const isComplete = completionPercent >= 100;
@@ -1716,12 +1838,16 @@ function App() {
                                     return (
                                       <li key={task.id} style={{ marginBottom: '12px', paddingBottom: '8px', borderBottom: '1px solid #333' }}>
                                         <div style={{ marginBottom: '6px', display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
-                                          <span style={{ fontSize: '0.9em', fontWeight: 'bold' }}>Seq:</span>
-                                          <SeqNumberInput
-                                            value={task.seq !== undefined && task.seq !== null ? task.seq : 0}
-                                            onCommit={val => handleTaskSeqChange(project.id, task.id, val)}
-                                            style={{ width: '60px', padding: '8px', border: '2px solid #4CAF50', borderRadius: '4px', fontSize: '1em', backgroundColor: '#fff', color: '#000', cursor: 'text', boxSizing: 'border-box' }}
-                                          />
+                                          {!hiddenPlannedProjects[project.id] && (
+                                            <>
+                                              <span style={{ fontSize: '0.9em', fontWeight: 'bold' }}>Seq:</span>
+                                              <SeqNumberInput
+                                                value={task.seq !== undefined && task.seq !== null ? task.seq : 0}
+                                                onCommit={val => handleTaskSeqChange(project.id, task.id, val)}
+                                                style={{ width: '60px', padding: '8px', border: '2px solid #4CAF50', borderRadius: '4px', fontSize: '1em', backgroundColor: '#fff', color: '#000', cursor: 'text', boxSizing: 'border-box' }}
+                                              />
+                                            </>
+                                          )}
                                           <strong style={{ color: (project.endDate && task.endTime && (new Date(task.endTime).getTime() > new Date(project.endDate).getTime())) ? 'crimson' : undefined }}>{taskTitle}</strong>
                                           <span style={{ fontSize: '0.8em', color: '#666' }}>
                                             (Task ID: {task.id})
@@ -1734,25 +1860,27 @@ function App() {
                                           </span>
                                         </div>
 
-                                        <div style={{ marginTop: '6px', fontSize: '0.95em', color: '#555' }}>
-                                          Start:
-                                          <input
-                                            type="datetime-local"
-                                            value={formatDateTimeLocal(task.startTime)}
-                                            onChange={e => handleTaskStartTimeChange(project.id, task.id, e.target.value)}
-                                            style={{ margin: '0 6px', width: '160px' }}
-                                          />
-                                          {formatDateTime(task.startTime)} |
-                                          Duration:
-                                          <input
-                                            type="number"
-                                            min="1"
-                                            value={task.duration}
-                                            onChange={e => handleTaskDurationChange(project.id, task.id, e.target.value)}
-                                            style={{ width: '60px', margin: '0 6px' }}
-                                          />
-                                          h | End: {formatDateTime(task.endTime)}
-                                        </div>
+                                        {!hiddenPlannedProjects[project.id] && (
+                                          <div style={{ marginTop: '6px', fontSize: '0.95em', color: '#555' }}>
+                                            Start:
+                                            <input
+                                              type="datetime-local"
+                                              value={formatDateTimeLocal(task.startTime)}
+                                              onChange={e => handleTaskStartTimeChange(project.id, task.id, e.target.value)}
+                                              style={{ margin: '0 6px', width: '160px' }}
+                                            />
+                                            {formatDateTime(task.startTime)} |
+                                            Duration:
+                                            <input
+                                              type="number"
+                                              min="1"
+                                              value={task.duration}
+                                              onChange={e => handleTaskDurationChange(project.id, task.id, e.target.value)}
+                                              style={{ width: '60px', margin: '0 6px' }}
+                                            />
+                                            h | End: {formatDateTime(task.endTime)}
+                                          </div>
+                                        )}
 
                                         <div style={{ marginTop: '6px', fontSize: '0.95em', color: '#555', display: 'flex', flexWrap: 'wrap', gap: '10px', alignItems: 'center' }}>
                                           Actual Start:
@@ -1778,18 +1906,15 @@ function App() {
                                             style={{ width: '80px' }}
                                           />
                                           Actual Sequence:
-                                          <input
-                                            type="number"
-                                            min="0"
-                                            value={task.actualSequence ?? ''}
-                                            onChange={e => handleTaskActualSequenceChange(project.id, task.id, e.target.value)}
+                                          <ActualSequenceInput
+                                            value={task.actualSequence}
+                                            onCommit={value => handleTaskActualSequenceChange(project.id, task.id, value)}
                                             style={{ width: '80px' }}
                                           />
                                           Actual Resource:
-                                          <input
-                                            type="text"
+                                          <ResourceTextInput
                                             value={task.actualResource ?? ''}
-                                            onChange={e => handleTaskActualResourceChange(project.id, task.id, e.target.value)}
+                                            onCommit={value => handleTaskActualResourceChange(project.id, task.id, value)}
                                             style={{ width: '140px' }}
                                           />
                                           % Complete:
@@ -1803,15 +1928,16 @@ function App() {
                                           />
                                         </div>
 
-                                        <div style={{ marginTop: '6px' }}>
-                                          Resource:
-                                          <input
-                                            type="text"
-                                            value={task.resource || ''}
-                                            onChange={e => handleTaskResourceChange(project.id, task.id, e.target.value)}
-                                            style={{ marginLeft: '8px', width: '180px' }}
-                                          />
-                                        </div>
+                                        {!hiddenPlannedProjects[project.id] && (
+                                          <div style={{ marginTop: '6px' }}>
+                                            Resource:
+                                            <ResourceTextInput
+                                              value={task.resource || ''}
+                                              onCommit={value => handleTaskResourceChange(project.id, task.id, value)}
+                                              style={{ marginLeft: '8px', width: '180px' }}
+                                            />
+                                          </div>
+                                        )}
 
                                         <button style={{ marginLeft: '10px', marginTop: '6px' }} onClick={() => handleDeleteTask(project.id, task.id)}>
                                           Delete Task
