@@ -35,7 +35,8 @@ async function createTask(id, resource, seq, startTime, endTime) {
     endTime,
     actualStart: null,
     actualEnd: null,
-    actualDuration: null,
+    revisedDuration: null,
+    remainingDuration: null,
     actualSequence: null,
     actualResource: null,
     percentComplete: 0
@@ -73,7 +74,8 @@ async function run() {
       endTime: endMoved,
       actualStart: '2026-10-01T13:15:00.000Z',
       actualEnd: null,
-      actualDuration: 1,
+      revisedDuration: 1,
+      remainingDuration: 3.5,
       actualSequence: 1,
       actualResource: 'Resource A - Actual',
       percentComplete: 25
@@ -91,7 +93,8 @@ async function run() {
           endTime: endRemaining,
           actualStart: null,
           actualEnd: null,
-          actualDuration: null,
+          revisedDuration: null,
+          remainingDuration: null,
           actualSequence: null,
           actualResource: '',
           percentComplete: 0
@@ -106,7 +109,8 @@ async function run() {
           endTime: endDestination,
           actualStart: null,
           actualEnd: null,
-          actualDuration: null,
+          revisedDuration: null,
+          remainingDuration: null,
           actualSequence: null,
           actualResource: '',
           percentComplete: 0
@@ -126,14 +130,22 @@ async function run() {
     assert.equal(moved.startTime, startMoved, 'planned start must be preserved');
     assert.equal(moved.endTime, endMoved, 'planned end must be preserved');
     assert.equal(moved.actualStart, movedTaskUpdate.actualStart);
-    assert.equal(moved.actualDuration, movedTaskUpdate.actualDuration);
+    assert.equal(moved.revisedDuration, movedTaskUpdate.revisedDuration);
+    assert.equal(moved.remaining_duration, movedTaskUpdate.remainingDuration);
     assert.equal(moved.actualSequence, movedTaskUpdate.actualSequence);
     assert.equal(moved.actualResource, movedTaskUpdate.actualResource);
     assert.equal(moved.percentComplete, movedTaskUpdate.percentComplete);
     assert.equal(persisted.get(taskIds.remaining).resource, 'Resource A');
     assert.equal(persisted.get(taskIds.destination).resource, 'Resource B');
 
-    console.log('4. Force a mid-batch failure and verify the transaction rolls back.');
+    console.log('4. Update remaining duration and verify it persists.');
+    const remainingDurationUpdate = await request(`/tasks/${taskIds.moved}`, 'PUT', {
+      remainingDuration: 2.25
+    });
+    assert.equal(remainingDurationUpdate.status, 200, `remaining duration update failed: ${JSON.stringify(remainingDurationUpdate.data)}`);
+    assert.equal((await readTasks()).get(taskIds.moved).remaining_duration, 2.25);
+
+    console.log('5. Force a mid-batch failure and verify the transaction rolls back.');
     const rollback = await request('/tasks/bulk', 'PUT', {
       tasks: [
         { ...movedTaskUpdate, resource: 'Should Roll Back', seq: 99 },
