@@ -521,7 +521,7 @@ app.get('/api/tasks/project/:projectId', (req, res) => {
 
 // Create task
 app.post('/api/tasks', (req, res) => {
-  const { id, scheduleId, companyId, userId, projectId, name, resource, seq, duration, startTime, endTime, actualStart, actualEnd, actualDuration, actualSequence, actualResource, percentComplete, createdAt, updatedAt } = req.body;
+  const { id, scheduleId, companyId, userId, projectId, name, plannedResource, seq, duration, startTime, endTime, currentStart, currentEnd, revisedDuration, remainingDuration, currentSequence, currentResource, percentComplete, createdAt, updatedAt } = req.body;
 
   if (!id || !scheduleId || !companyId || !userId || !projectId || !name) {
     return res.status(400).json({ error: 'Missing required fields' });
@@ -529,13 +529,13 @@ app.post('/api/tasks', (req, res) => {
 
   const now = new Date().toISOString();
   db.run(
-    `INSERT INTO tasks (id, scheduleId, companyId, userId, projectId, name, resource, seq, duration, startTime, endTime, actualStart, actualEnd, actualDuration, actualSequence, actualResource, percentComplete, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [id, scheduleId, companyId, userId, projectId, name, resource || '', seq || 0, duration || 0, startTime || '', endTime || '', actualStart !== undefined ? (actualStart || null) : null, actualEnd !== undefined ? (actualEnd || null) : null, actualDuration !== undefined ? actualDuration : null, actualSequence !== undefined ? actualSequence : null, actualResource !== undefined ? (actualResource || null) : null, percentComplete !== undefined ? percentComplete : 0, createdAt || now, updatedAt || now],
+    `INSERT INTO tasks (id, scheduleId, companyId, userId, projectId, name, plannedResource, seq, duration, startTime, endTime, currentStart, currentEnd, revisedDuration, remaining_duration, currentSequence, currentResource, percentComplete, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [id, scheduleId, companyId, userId, projectId, name, plannedResource || '', seq || 0, duration || 0, startTime || '', endTime || '', currentStart !== undefined ? (currentStart || null) : null, currentEnd !== undefined ? (currentEnd || null) : null, revisedDuration !== undefined ? revisedDuration : null, remainingDuration !== undefined ? remainingDuration : null, currentSequence !== undefined ? currentSequence : null, currentResource !== undefined ? (currentResource || null) : null, percentComplete !== undefined ? percentComplete : 0, createdAt || now, updatedAt || now],
     function(err) {
       if (err) {
         res.status(500).json({ error: err.message });
       } else {
-        res.json({ id, scheduleId, companyId, userId, projectId, name, resource, seq, duration, startTime, endTime, actualStart: actualStart !== undefined ? (actualStart || null) : null, actualEnd: actualEnd !== undefined ? (actualEnd || null) : null, actualDuration: actualDuration !== undefined ? actualDuration : null, actualSequence: actualSequence !== undefined ? actualSequence : null, actualResource: actualResource !== undefined ? (actualResource || null) : null, percentComplete: percentComplete !== undefined ? percentComplete : 0, createdAt: createdAt || now, updatedAt: updatedAt || now });
+        res.json({ id, scheduleId, companyId, userId, projectId, name, plannedResource, seq, duration, startTime, endTime, currentStart: currentStart !== undefined ? (currentStart || null) : null, currentEnd: currentEnd !== undefined ? (currentEnd || null) : null, revisedDuration: revisedDuration !== undefined ? revisedDuration : null, remaining_duration: remainingDuration !== undefined ? remainingDuration : null, currentSequence: currentSequence !== undefined ? currentSequence : null, currentResource: currentResource !== undefined ? (currentResource || null) : null, percentComplete: percentComplete !== undefined ? percentComplete : 0, createdAt: createdAt || now, updatedAt: updatedAt || now });
       }
     }
   );
@@ -565,12 +565,61 @@ app.put('/api/tasks/bulk', (req, res) => {
 
     const task = tasks[index];
     db.run(
-      `UPDATE tasks SET resource = ?, seq = ?, duration = ?, startTime = ?, endTime = ?, actualStart = ?, actualEnd = ?, actualDuration = ?, actualSequence = ?, actualResource = ?, percentComplete = ?, updatedAt = ? WHERE id = ?`,
+      `UPDATE tasks SET plannedResource = ?, seq = ?, duration = ?, startTime = ?, endTime = ?, currentStart = ?, currentEnd = ?, revisedDuration = ?, remaining_duration = ?, currentSequence = ?, currentResource = ?, percentComplete = ?, updatedAt = ? WHERE id = ?`,
       [
-        task.resource ?? '', task.seq ?? 0, task.duration ?? 0,
-        task.startTime ?? '', task.endTime ?? '', task.actualStart ?? null,
-        task.actualEnd ?? null, task.actualDuration ?? null,
-        task.actualSequence ?? null, task.actualResource || null,
+        task.plannedResource ?? '', task.seq ?? 0, task.duration ?? 0,
+        task.startTime ?? '', task.endTime ?? '', task.currentStart ?? null,
+        task.currentEnd ?? null, task.revisedDuration ?? null,
+        task.remainingDuration ?? null,
+        task.currentSequence ?? null, task.currentResource || null,
+        task.percentComplete ?? 0, new Date().toISOString(), String(task.id)
+      ],
+      function(err) {
+        if (err || this.changes === 0) {
+          return db.run('ROLLBACK', () => res.status(err ? 500 : 404).json({
+            error: err ? err.message : `Task ${task.id} not found`
+          }));
+        }
+        updateTask(index + 1);
+      }
+    );
+  };
+
+  db.run('BEGIN TRANSACTION', err => {
+    if (err) return res.status(500).json({ error: err.message });
+    updateTask(0);
+  });
+});
+
+// Update current-schedule fields atomically without changing planned task data
+app.put('/api/tasks/current/bulk', (req, res) => {
+  const { tasks } = req.body;
+  if (!Array.isArray(tasks) || tasks.length === 0 || tasks.some(task => !task || !task.id)) {
+    return res.status(400).json({ error: 'A non-empty list of tasks with IDs is required' });
+  }
+
+  const taskIds = tasks.map(task => String(task.id));
+  if (new Set(taskIds).size !== taskIds.length) {
+    return res.status(400).json({ error: 'Task IDs must be unique' });
+  }
+
+  const updateTask = index => {
+    if (index === tasks.length) {
+      return db.run('COMMIT', err => {
+        if (err) {
+          return db.run('ROLLBACK', () => res.status(500).json({ error: err.message }));
+        }
+        res.json({ success: true, updatedCount: tasks.length });
+      });
+    }
+
+    const task = tasks[index];
+    db.run(
+      `UPDATE tasks SET currentStart = ?, currentEnd = ?, revisedDuration = ?, remaining_duration = ?, currentSequence = ?, currentResource = ?, percentComplete = ?, updatedAt = ? WHERE id = ?`,
+      [
+        task.currentStart ?? null, task.currentEnd ?? null,
+        task.revisedDuration ?? null, task.remainingDuration ?? null,
+        task.currentSequence ?? null, task.currentResource || null,
         task.percentComplete ?? 0, new Date().toISOString(), String(task.id)
       ],
       function(err) {
@@ -593,22 +642,23 @@ app.put('/api/tasks/bulk', (req, res) => {
 // Update task
 app.put('/api/tasks/:id', (req, res) => {
   const { id } = req.params;
-  const { name, resource, seq, duration, startTime, endTime, actualStart, actualEnd, actualDuration, actualSequence, actualResource, percentComplete } = req.body;
+  const { name, plannedResource, seq, duration, startTime, endTime, currentStart, currentEnd, revisedDuration, remainingDuration, currentSequence, currentResource, percentComplete } = req.body;
 
   const fields = [];
   const values = [];
 
   if (name !== undefined) { fields.push('name = ?'); values.push(name); }
-  if (resource !== undefined) { fields.push('resource = ?'); values.push(resource); }
+  if (plannedResource !== undefined) { fields.push('plannedResource = ?'); values.push(plannedResource); }
   if (seq !== undefined) { fields.push('seq = ?'); values.push(seq); }
   if (duration !== undefined) { fields.push('duration = ?'); values.push(duration); }
   if (startTime !== undefined) { fields.push('startTime = ?'); values.push(startTime); }
   if (endTime !== undefined) { fields.push('endTime = ?'); values.push(endTime); }
-  if (actualStart !== undefined) { fields.push('actualStart = ?'); values.push(actualStart || null); }
-  if (actualEnd !== undefined) { fields.push('actualEnd = ?'); values.push(actualEnd || null); }
-  if (actualDuration !== undefined) { fields.push('actualDuration = ?'); values.push(actualDuration); }
-  if (actualSequence !== undefined) { fields.push('actualSequence = ?'); values.push(actualSequence); }
-  if (actualResource !== undefined) { fields.push('actualResource = ?'); values.push(actualResource || null); }
+  if (currentStart !== undefined) { fields.push('currentStart = ?'); values.push(currentStart || null); }
+  if (currentEnd !== undefined) { fields.push('currentEnd = ?'); values.push(currentEnd || null); }
+  if (revisedDuration !== undefined) { fields.push('revisedDuration = ?'); values.push(revisedDuration); }
+  if (remainingDuration !== undefined) { fields.push('remaining_duration = ?'); values.push(remainingDuration); }
+  if (currentSequence !== undefined) { fields.push('currentSequence = ?'); values.push(currentSequence); }
+  if (currentResource !== undefined) { fields.push('currentResource = ?'); values.push(currentResource || null); }
   if (percentComplete !== undefined) { fields.push('percentComplete = ?'); values.push(percentComplete); }
 
   fields.push('updatedAt = ?'); values.push(new Date().toISOString());

@@ -20,7 +20,7 @@ async function request(endpoint, method = 'GET', body = undefined) {
   return { status: response.status, data };
 }
 
-async function createTask(id, resource, seq, startTime, endTime) {
+async function createTask(id, plannedResource, seq, startTime, endTime) {
   const { status, data } = await request('/tasks', 'POST', {
     id,
     scheduleId: `resource_move_schedule_${stamp}`,
@@ -28,17 +28,17 @@ async function createTask(id, resource, seq, startTime, endTime) {
     userId: `resource_move_user_${stamp}`,
     projectId,
     name: id,
-    resource,
+    plannedResource,
     seq,
     duration: 4,
     startTime,
     endTime,
-    actualStart: null,
-    actualEnd: null,
+    currentStart: null,
+    currentEnd: null,
     revisedDuration: null,
     remainingDuration: null,
-    actualSequence: null,
-    actualResource: null,
+    currentSequence: null,
+    currentResource: null,
     percentComplete: 0
   });
   assert.equal(status, 200, `task creation failed: ${JSON.stringify(data)}`);
@@ -67,17 +67,17 @@ async function run() {
 
     const movedTaskUpdate = {
       id: taskIds.moved,
-      resource: 'Resource B',
+      plannedResource: 'Resource B',
       seq: 2,
       duration: 4,
       startTime: startMoved,
       endTime: endMoved,
-      actualStart: '2026-10-01T13:15:00.000Z',
-      actualEnd: null,
+      currentStart: '2026-10-01T13:15:00.000Z',
+      currentEnd: null,
       revisedDuration: 1,
       remainingDuration: 3.5,
-      actualSequence: 1,
-      actualResource: 'Resource A - Actual',
+      currentSequence: 1,
+      currentResource: 'Resource A - Current',
       percentComplete: 25
     };
 
@@ -86,33 +86,33 @@ async function run() {
       tasks: [
         {
           id: taskIds.remaining,
-          resource: 'Resource A',
+          plannedResource: 'Resource A',
           seq: 1,
           duration: 4,
           startTime: startRemaining,
           endTime: endRemaining,
-          actualStart: null,
-          actualEnd: null,
+          currentStart: null,
+          currentEnd: null,
           revisedDuration: null,
           remainingDuration: null,
-          actualSequence: null,
-          actualResource: '',
+          currentSequence: null,
+          currentResource: '',
           percentComplete: 0
         },
         movedTaskUpdate,
         {
           id: taskIds.destination,
-          resource: 'Resource B',
+          plannedResource: 'Resource B',
           seq: 1,
           duration: 4,
           startTime: startDestination,
           endTime: endDestination,
-          actualStart: null,
-          actualEnd: null,
+          currentStart: null,
+          currentEnd: null,
           revisedDuration: null,
           remainingDuration: null,
-          actualSequence: null,
-          actualResource: '',
+          currentSequence: null,
+          currentResource: '',
           percentComplete: 0
         }
       ]
@@ -120,41 +120,76 @@ async function run() {
     assert.equal(success.status, 200, `bulk update failed: ${JSON.stringify(success.data)}`);
     assert.equal(success.data.updatedCount, 3);
 
-    console.log('3. Read back tasks and verify resource placement and planned/actual values.');
+    console.log('3. Read back tasks and verify resource placement and planned/current values.');
     const persisted = await readTasks();
     const moved = persisted.get(taskIds.moved);
     assert.ok(moved, 'moved task should be present after reload');
-    assert.equal(moved.resource, 'Resource B');
+    assert.equal(moved.plannedResource, 'Resource B');
     assert.equal(moved.seq, movedTaskUpdate.seq);
     assert.equal(moved.duration, movedTaskUpdate.duration);
     assert.equal(moved.startTime, startMoved, 'planned start must be preserved');
     assert.equal(moved.endTime, endMoved, 'planned end must be preserved');
-    assert.equal(moved.actualStart, movedTaskUpdate.actualStart);
+    assert.equal(moved.currentStart, movedTaskUpdate.currentStart);
     assert.equal(moved.revisedDuration, movedTaskUpdate.revisedDuration);
     assert.equal(moved.remaining_duration, movedTaskUpdate.remainingDuration);
-    assert.equal(moved.actualSequence, movedTaskUpdate.actualSequence);
-    assert.equal(moved.actualResource, movedTaskUpdate.actualResource);
+    assert.equal(moved.currentSequence, movedTaskUpdate.currentSequence);
+    assert.equal(moved.currentResource, movedTaskUpdate.currentResource);
     assert.equal(moved.percentComplete, movedTaskUpdate.percentComplete);
-    assert.equal(persisted.get(taskIds.remaining).resource, 'Resource A');
-    assert.equal(persisted.get(taskIds.destination).resource, 'Resource B');
+    assert.equal(persisted.get(taskIds.remaining).plannedResource, 'Resource A');
+    assert.equal(persisted.get(taskIds.destination).plannedResource, 'Resource B');
 
-    console.log('4. Update remaining duration and verify it persists.');
+    console.log('4. Update current schedule fields and verify planned fields stay unchanged.');
+    const currentScheduleUpdate = await request('/tasks/current/bulk', 'PUT', {
+      tasks: [{
+        id: taskIds.moved,
+        currentStart: movedTaskUpdate.currentStart,
+        currentEnd: '2026-10-01T15:15:00.000Z',
+        revisedDuration: 2,
+        remainingDuration: 1.5,
+        currentSequence: 3,
+        currentResource: 'Resource B - Current',
+        percentComplete: 25
+      }]
+    });
+    assert.equal(currentScheduleUpdate.status, 200, `current schedule update failed: ${JSON.stringify(currentScheduleUpdate.data)}`);
+    const currentUpdatedTask = (await readTasks()).get(taskIds.moved);
+    assert.equal(currentUpdatedTask.currentEnd, '2026-10-01T15:15:00.000Z');
+    assert.equal(currentUpdatedTask.currentSequence, 3);
+    assert.equal(currentUpdatedTask.currentResource, 'Resource B - Current');
+    assert.equal(currentUpdatedTask.plannedResource, 'Resource B');
+    assert.equal(currentUpdatedTask.seq, movedTaskUpdate.seq);
+    assert.equal(currentUpdatedTask.startTime, startMoved);
+    assert.equal(currentUpdatedTask.endTime, endMoved);
+
+    console.log('5. Verify current schedule updates roll back when a task is missing.');
+    const currentRollback = await request('/tasks/current/bulk', 'PUT', {
+      tasks: [
+        { id: taskIds.moved, currentSequence: 99, currentResource: 'Should Roll Back' },
+        { id: `current_schedule_missing_${stamp}`, currentSequence: 1, currentResource: 'Missing' }
+      ]
+    });
+    assert.equal(currentRollback.status, 404, `expected missing-task rejection, got ${currentRollback.status}`);
+    const afterCurrentRollback = (await readTasks()).get(taskIds.moved);
+    assert.equal(afterCurrentRollback.currentResource, 'Resource B - Current');
+    assert.equal(afterCurrentRollback.currentSequence, 3);
+
+    console.log('6. Update remaining duration and verify it persists.');
     const remainingDurationUpdate = await request(`/tasks/${taskIds.moved}`, 'PUT', {
       remainingDuration: 2.25
     });
     assert.equal(remainingDurationUpdate.status, 200, `remaining duration update failed: ${JSON.stringify(remainingDurationUpdate.data)}`);
     assert.equal((await readTasks()).get(taskIds.moved).remaining_duration, 2.25);
 
-    console.log('5. Force a mid-batch failure and verify the transaction rolls back.');
+    console.log('7. Force a planned resource batch failure and verify the transaction rolls back.');
     const rollback = await request('/tasks/bulk', 'PUT', {
       tasks: [
-        { ...movedTaskUpdate, resource: 'Should Roll Back', seq: 99 },
+        { ...movedTaskUpdate, plannedResource: 'Should Roll Back', seq: 99 },
         { ...movedTaskUpdate, id: `resource_move_missing_${stamp}` }
       ]
     });
     assert.equal(rollback.status, 404, `expected missing-task rejection, got ${rollback.status}`);
     const afterRollback = (await readTasks()).get(taskIds.moved);
-    assert.equal(afterRollback.resource, 'Resource B', 'first update should be rolled back');
+    assert.equal(afterRollback.plannedResource, 'Resource B', 'first update should be rolled back');
     assert.equal(afterRollback.seq, movedTaskUpdate.seq, 'sequence update should be rolled back');
 
     console.log('PASS: bulk move persisted all affected tasks and rolled back failed batches.');

@@ -389,6 +389,21 @@ export const tasksAPI = {
     }
   },
 
+  async updateCurrentMany(tasks) {
+    try {
+      const response = await fetch(`${API_URL}/tasks/current/bulk`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tasks })
+      });
+      if (!response.ok) throw new Error('Failed to update current task schedule');
+      return await response.json();
+    } catch (error) {
+      console.error('Error updating current task schedule:', error);
+      return null;
+    }
+  },
+
   async delete(id) {
     try {
       const response = await fetch(`${API_URL}/tasks/${id}`, {

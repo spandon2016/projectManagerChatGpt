@@ -65,7 +65,7 @@ function ResourceTextInput({ value, onCommit, style }) {
   );
 }
 
-function ActualSequenceInput({ value, onCommit, style }) {
+function CurrentSequenceInput({ value, onCommit, style }) {
   const normalizedValue = value == null ? '' : String(value);
   const [draft, setDraft] = useState(normalizedValue);
 
@@ -110,6 +110,101 @@ import Calendar from './models/calendar';
 import AdminConsole from './components/AdminConsole';
 import { companiesAPI, usersAPI, healthAPI, calendarsAPI, tasksAPI, schedulesAPI } from './services/api';
 
+export function calculatePercentComplete(revisedDuration, remainingDuration) {
+  if (
+    revisedDuration == null || revisedDuration === '' ||
+    remainingDuration == null || remainingDuration === ''
+  ) {
+    return null;
+  }
+
+  const revised = Number(revisedDuration);
+  const remaining = Number(remainingDuration);
+  if (
+    !Number.isFinite(revised) || revised < 0 ||
+    !Number.isFinite(remaining) || remaining < 0
+  ) {
+    return null;
+  }
+
+  return revised === 0
+    ? null
+    : Math.round(((revised - remaining) / revised) * 100);
+}
+
+export function groupTasksByEffectiveResource(tasks = []) {
+  const groups = new Map();
+  for (const task of tasks) {
+    const currentResource = (task.currentResource ?? '').trim();
+    const resourceKey = currentResource || (task.plannedResource ?? '').trim();
+    if (!groups.has(resourceKey)) {
+      groups.set(resourceKey, { resourceKey, resourceType: 'planned', tasks: [] });
+    }
+    const group = groups.get(resourceKey);
+    if (currentResource) group.resourceType = 'current';
+    group.tasks.push(task);
+  }
+
+  return [...groups.values()].sort((a, b) => a.resourceKey.localeCompare(b.resourceKey));
+}
+
+export function getEffectiveCurrentResource(task) {
+  return (task.currentResource ?? '').trim() || (task.plannedResource ?? '').trim();
+}
+
+export function getNextCurrentSequence(tasks, taskId, currentResource) {
+  const resourceKey = (currentResource ?? '').trim();
+
+  const sequences = tasks
+    .filter(task => task.id !== taskId && getEffectiveCurrentResource(task) === resourceKey)
+    .map(task => Number(task.currentSequence ?? task.seq ?? 0))
+    .filter(Number.isFinite);
+  return Math.max(0, ...sequences) + 1;
+}
+
+export function recalculateCurrentResourceTasks(tasks = [], fallbackStart = null, calendar, anchorTaskId = null) {
+  const ordered = [...tasks].sort((a, b) => {
+    const sequenceDifference = (a.currentSequence ?? a.seq ?? 0) - (b.currentSequence ?? b.seq ?? 0);
+    if (sequenceDifference) return sequenceDifference;
+    return String(a.id).localeCompare(String(b.id));
+  });
+  if (!ordered.length) return [];
+
+  const toValidDate = value => {
+    if (!value) return null;
+    const date = new Date(value);
+    return Number.isFinite(date.getTime()) ? date : null;
+  };
+  const anchorIndex = anchorTaskId == null
+    ? -1
+    : ordered.findIndex(task => task.id === anchorTaskId);
+  const anchorTask = anchorIndex >= 0 ? ordered[anchorIndex] : ordered[0];
+  const firstStart = toValidDate(anchorTask.currentStart)
+    || toValidDate(anchorTask.startTime)
+    || toValidDate(fallbackStart)
+    || new Date();
+  let cursor = calendar.adjustToWorkStart(firstStart);
+  const recalculated = new Map();
+
+  ordered.forEach((task, index) => {
+    if (anchorIndex >= 0 && index < anchorIndex) return;
+
+    const rawDuration = task.revisedDuration ?? task.duration ?? 0;
+    const duration = Number(rawDuration);
+    const scheduledDuration = Number.isFinite(duration) && duration >= 0 ? duration : 0;
+    const currentStart = cursor;
+    const currentEnd = calendar.addWorkingHours(currentStart, scheduledDuration);
+    recalculated.set(task.id, {
+      ...task,
+      currentStart: currentStart.toISOString(),
+      currentEnd: currentEnd.toISOString()
+    });
+    cursor = currentEnd;
+  });
+
+  return tasks.map(task => recalculated.get(task.id) || task);
+}
+
 function App() {
   const WORK_START_HOUR = 9;
   const WORK_END_HOUR = 17; // exclusive end (workday is 9..17)
@@ -137,11 +232,10 @@ function App() {
   const [backendConnected, setBackendConnected] = useState(false);
   const [view, setView] = useState('main'); // 'main' or 'admin'
 
-  const getEffectiveResource = task => task.actualResource ?? task.resource ?? '';
-  const getEffectiveSequence = task => task.actualSequence ?? task.seq ?? 0;
-  const getEffectiveStart = task => task.actualStart ?? task.startTime ?? '';
-  const getEffectiveDuration = task => task.actualDuration ?? task.duration ?? 0;
-  const getEffectiveEnd = task => task.actualEnd ?? task.endTime ?? '';
+  const getEffectiveSequence = task => task.currentSequence ?? task.seq ?? 0;
+  const getEffectiveStart = task => task.currentStart ?? task.startTime ?? '';
+  const getEffectiveDuration = task => task.revisedDuration ?? task.duration ?? 0;
+  const getEffectiveEnd = task => task.currentEnd ?? task.endTime ?? '';
   const comparePlannedTaskOrder = (a, b) => {
     const sequenceDifference = (a.seq ?? 0) - (b.seq ?? 0);
     if (sequenceDifference) return sequenceDifference;
@@ -175,21 +269,22 @@ function App() {
 
   const groupTasksByResource = (tasks = []) => {
     return tasks.reduce((acc, task) => {
-      const resourceKey = task.resource || '';
+      const resourceKey = task.plannedResource || '';
       if (!acc[resourceKey]) acc[resourceKey] = [];
       acc[resourceKey].push({
         id: task.id,
         name: task.name,
-        resource: task.resource || '',
+        plannedResource: task.plannedResource || '',
         seq: task.seq || 0,
         duration: task.duration || 0,
         startTime: task.startTime || '',
         endTime: task.endTime || '',
-        actualStart: task.actualStart || null,
-        actualEnd: task.actualEnd || null,
-        actualDuration: task.actualDuration ?? null,
-        actualSequence: task.actualSequence ?? null,
-        actualResource: task.actualResource ?? '',
+        currentStart: task.currentStart || null,
+        currentEnd: task.currentEnd || null,
+        revisedDuration: task.revisedDuration ?? null,
+        remainingDuration: task.remaining_duration ?? task.remainingDuration ?? null,
+        currentSequence: task.currentSequence ?? null,
+        currentResource: task.currentResource ?? '',
         percentComplete: task.percentComplete ?? 0
       });
       acc[resourceKey].sort(comparePlannedTaskOrder);
@@ -210,6 +305,17 @@ function App() {
       for (const [resourceKey, tasks] of Object.entries(groupTasksByResource(taskRows || []))) {
         recalculatedTaskLists[resourceKey] = recalcResourceList(tasks, 1, schedule.startDate, calendar);
       }
+      const currentResourceTasks = Object.values(recalculatedTaskLists).flat();
+      const currentResourceKeys = new Set(currentResourceTasks.map(getEffectiveCurrentResource));
+      for (const resourceKey of currentResourceKeys) {
+        const resourceTasks = currentResourceTasks.filter(task => getEffectiveCurrentResource(task) === resourceKey);
+        const recalculatedTasks = recalculateCurrentResourceTasks(resourceTasks, schedule.startDate, calendar);
+        const recalculatedById = new Map(recalculatedTasks.map(task => [task.id, task]));
+        for (const plannedResource of Object.keys(recalculatedTaskLists)) {
+          recalculatedTaskLists[plannedResource] = recalculatedTaskLists[plannedResource]
+            .map(task => recalculatedById.get(task.id) || task);
+        }
+      }
       
       return {
         id: schedule.id,
@@ -217,7 +323,7 @@ function App() {
         taskLists: recalculatedTaskLists,
         taskInput: '',
         durationInput: '',
-        resourceInput: '',
+        plannedResourceInput: '',
         sequenceInput: '',
         startDate: schedule.startDate,
         endDate: schedule.endDate
@@ -716,16 +822,17 @@ function App() {
                   userId: company.userId,
                   projectId: String(project.id),
                   name: task.name || 'Untitled Task',
-                  resource: resourceKey || '',
+                  plannedResource: resourceKey || '',
                   seq: task.seq || 0,
                   duration: task.duration || 0,
                   startTime: task.startTime ? (new Date(task.startTime)).toISOString() : '',
                   endTime: task.endTime ? (new Date(task.endTime)).toISOString() : '',
-                  actualStart: task.actualStart ?? null,
-                  actualEnd: task.actualEnd ?? null,
-                  actualDuration: task.actualDuration ?? null,
-                  actualSequence: task.actualSequence ?? null,
-                  actualResource: task.actualResource ?? '',
+                  currentStart: task.currentStart ?? null,
+                  currentEnd: task.currentEnd ?? null,
+                  revisedDuration: task.revisedDuration ?? null,
+                  remainingDuration: task.remainingDuration ?? null,
+                  currentSequence: task.currentSequence ?? null,
+                  currentResource: task.currentResource ?? '',
                   percentComplete: task.percentComplete ?? 0,
                   createdAt: now,
                   updatedAt: now
@@ -876,22 +983,23 @@ function App() {
       const tasks = await tasksAPI.getByProjectId(String(projectId));
       const updates = (tasks || []).map(task => ({
         id: String(task.id),
-        resource: task.resource || '',
+        plannedResource: task.plannedResource || '',
         seq: task.seq ?? 0,
         duration: task.duration ?? 0,
         startTime: task.startTime ? new Date(task.startTime).toISOString() : '',
         endTime: task.endTime ? new Date(task.endTime).toISOString() : '',
-        actualResource: task.actualResource == null || task.actualResource === '' ? task.resource || '' : task.actualResource,
-        actualSequence: task.actualSequence == null || task.actualSequence === '' ? task.seq ?? null : task.actualSequence,
-        actualDuration: task.actualDuration == null || task.actualDuration === '' ? task.duration ?? null : task.actualDuration,
-        actualStart: task.actualStart == null || task.actualStart === '' ? task.startTime || null : task.actualStart,
-        actualEnd: task.actualEnd == null || task.actualEnd === '' ? task.endTime || null : task.actualEnd,
+        currentResource: task.currentResource == null || task.currentResource === '' ? task.plannedResource || '' : task.currentResource,
+        currentSequence: task.currentSequence == null || task.currentSequence === '' ? task.seq ?? null : task.currentSequence,
+        revisedDuration: task.revisedDuration == null || task.revisedDuration === '' ? task.duration ?? null : task.revisedDuration,
+        remainingDuration: task.remaining_duration ?? task.remainingDuration ?? null,
+        currentStart: task.currentStart == null || task.currentStart === '' ? task.startTime || null : task.currentStart,
+        currentEnd: task.currentEnd == null || task.currentEnd === '' ? task.endTime || null : task.currentEnd,
         percentComplete: task.percentComplete ?? 0
       }));
 
       if (updates.length) {
         const result = await tasksAPI.updateMany(updates);
-        if (!result) throw new Error('Failed to copy planned values into missing actual fields');
+        if (!result) throw new Error('Failed to copy planned values into missing current fields');
       }
 
       await reloadCurrentUserData();
@@ -1006,12 +1114,12 @@ function App() {
     }));
   };
 
-  const handleResourceInputChange = (projectId, value) => {
+  const handlePlannedResourceInputChange = (projectId, value) => {
     if (!selectedCompanyId) return;
     setCompanies(prev => prev.map(c => {
       if (c.id !== selectedCompanyId) return c;
       const nc = Company.fromObject(c);
-      nc.projects = (nc.projects || []).map(project => project.id === projectId ? { ...project, resourceInput: value } : project);
+      nc.projects = (nc.projects || []).map(project => project.id === projectId ? { ...project, plannedResourceInput: value } : project);
       return nc;
     }));
   };
@@ -1026,10 +1134,9 @@ function App() {
     }));
   };
 
-  const handleTaskResourceChange = async (projectId, taskId, value) => {
+  const handleTaskPlannedResourceChange = async (projectId, taskId, value) => {
     if (!selectedCompanyId || !backendConnected) return;
 
-    let updatedTask = null;
     const company = companies.find(c => c.id === selectedCompanyId);
     if (!company) return;
 
@@ -1049,7 +1156,7 @@ function App() {
 
     if (!lists[newKey]) lists[newKey] = [];
     const maxSeq = lists[newKey].reduce((m, t) => Math.max(m, t.seq || 0), 0);
-    const moved = { ...task, resource: newKey, seq: maxSeq + 1 };
+    const moved = { ...task, plannedResource: newKey, seq: maxSeq + 1 };
     lists[newKey] = [...lists[newKey], moved];
 
     updatedTask = lists[newKey].find(t => t.id === taskId) || moved;
@@ -1057,16 +1164,17 @@ function App() {
     try {
       const affectedTasks = [...lists[oldKey], ...lists[newKey]].map(taskToSave => ({
         id: String(taskToSave.id),
-        resource: taskToSave.resource || '',
+        plannedResource: taskToSave.plannedResource || '',
         seq: taskToSave.seq || 0,
         duration: taskToSave.duration || 0,
         startTime: taskToSave.startTime ? new Date(taskToSave.startTime).toISOString() : '',
         endTime: taskToSave.endTime ? new Date(taskToSave.endTime).toISOString() : '',
-        actualStart: taskToSave.actualStart ?? null,
-        actualEnd: taskToSave.actualEnd ?? null,
-        actualDuration: taskToSave.actualDuration ?? null,
-        actualSequence: taskToSave.actualSequence ?? null,
-        actualResource: taskToSave.actualResource ?? '',
+        currentStart: taskToSave.currentStart ?? null,
+        currentEnd: taskToSave.currentEnd ?? null,
+        revisedDuration: taskToSave.revisedDuration ?? null,
+        remainingDuration: taskToSave.remainingDuration ?? null,
+        currentSequence: taskToSave.currentSequence ?? null,
+        currentResource: taskToSave.currentResource ?? '',
         percentComplete: taskToSave.percentComplete ?? 0
       }));
       const result = await tasksAPI.updateMany(affectedTasks);
@@ -1083,12 +1191,12 @@ function App() {
       }));
       await reloadCurrentUserData();
     } catch (error) {
-      console.warn('Failed to update task resource in database:', error);
+      console.warn('Failed to update task planned resource in database:', error);
       alert(`Failed to move task: ${error.message}`);
     }
   };
 
-  // Recalculate planned dates within a resource list, without using actual task values.
+  // Recalculate planned dates within a resource list, without using current task values.
   const recalcResourceList = (tasks = [], threshold = 1, projectStartDate = null, calendar = null) => {
     const earlier = (tasks || []).filter(t => (t.seq ?? 0) < threshold)
       .sort(comparePlannedTaskOrder);
@@ -1119,6 +1227,65 @@ function App() {
     return (tasks || []).map(t => recalcedMap[t.id] ? recalcedMap[t.id] : t);
   };
 
+  const recalculateAndSaveCurrentResources = async (
+    projectId,
+    project,
+    company,
+    taskLists,
+    resourceKeys,
+    { anchorTaskId = null, taskIdsToSave = [] } = {}
+  ) => {
+    const allTasks = Object.values(taskLists).flat();
+    const updatedTasks = new Map();
+    for (const resourceKey of new Set(resourceKeys.map(key => (key ?? '').trim()))) {
+      const resourceTasks = allTasks.filter(task => getEffectiveCurrentResource(task) === resourceKey);
+      const recalculatedTasks = recalculateCurrentResourceTasks(
+        resourceTasks,
+        project.startDate,
+        company.calendar,
+        resourceTasks.some(task => task.id === anchorTaskId) ? anchorTaskId : null
+      );
+      recalculatedTasks.forEach(task => updatedTasks.set(task.id, task));
+    }
+
+    for (const taskId of taskIdsToSave) {
+      const task = allTasks.find(item => item.id === taskId);
+      if (task && !updatedTasks.has(task.id)) updatedTasks.set(task.id, task);
+    }
+
+    const updatedTaskLists = Object.fromEntries(
+      Object.entries(taskLists).map(([plannedResource, tasks]) => [
+        plannedResource,
+        tasks.map(task => updatedTasks.get(task.id) || task)
+      ])
+    );
+    const updates = [...updatedTasks.values()].map(task => ({
+      id: String(task.id),
+      currentStart: task.currentStart ?? null,
+      currentEnd: task.currentEnd ?? null,
+      revisedDuration: task.revisedDuration ?? null,
+      remainingDuration: task.remainingDuration ?? task.remaining_duration ?? null,
+      currentSequence: task.currentSequence ?? null,
+      currentResource: task.currentResource ?? '',
+      percentComplete: task.percentComplete ?? 0
+    }));
+
+    if (!updates.length) return;
+    const result = await tasksAPI.updateCurrentMany(updates);
+    if (!result) throw new Error('Failed to save recalculated current resource schedule');
+
+    setCompanies(prev => prev.map(currentCompany => {
+      if (currentCompany.id !== selectedCompanyId) return currentCompany;
+      return {
+        ...currentCompany,
+        projects: (currentCompany.projects || []).map(currentProject => currentProject.id === projectId
+          ? { ...currentProject, taskLists: updatedTaskLists }
+          : currentProject)
+      };
+    }));
+    await reloadCurrentUserData();
+  };
+
   const handleAddTask = async (projectId) => {
     if (!selectedCompanyId || !backendConnected) return;
 
@@ -1130,7 +1297,7 @@ function App() {
 
     const duration = parseInt(project.durationInput, 10);
     const lists = { ...(project.taskLists || {}) };
-    const resources = (project.resourceInput || '').split(',').map(r => r.trim()).filter(v => v !== '');
+    const resources = (project.plannedResourceInput || '').split(',').map(r => r.trim()).filter(v => v !== '');
     if (resources.length === 0) resources.push('');
 
     // Use provided sequence number or calculate it
@@ -1151,16 +1318,17 @@ function App() {
         userId: company.userId,
         projectId: String(project.id),
         name: project.taskInput,
-        resource: resKey,
+        plannedResource: resKey,
         seq,
         duration,
         startTime,
         endTime,
-        actualStart: null,
-        actualEnd: null,
-        actualDuration: null,
-        actualSequence: null,
-        actualResource: '',
+        currentStart: null,
+        currentEnd: null,
+        revisedDuration: null,
+        remainingDuration: null,
+        currentSequence: null,
+        currentResource: '',
         percentComplete: 0
       });
     });
@@ -1174,16 +1342,17 @@ function App() {
           userId: task.userId,
           projectId: task.projectId,
           name: task.name,
-          resource: task.resource || '',
+          plannedResource: task.plannedResource || '',
           seq: task.seq || 0,
           duration: task.duration || 0,
           startTime: task.startTime ? new Date(task.startTime).toISOString() : '',
           endTime: task.endTime ? new Date(task.endTime).toISOString() : '',
-          actualStart: task.actualStart ?? null,
-          actualEnd: task.actualEnd ?? null,
-          actualDuration: task.actualDuration ?? null,
-          actualSequence: task.actualSequence ?? null,
-          actualResource: task.actualResource ?? '',
+          currentStart: task.currentStart ?? null,
+          currentEnd: task.currentEnd ?? null,
+          revisedDuration: task.revisedDuration ?? null,
+          remainingDuration: task.remainingDuration ?? null,
+          currentSequence: task.currentSequence ?? null,
+          currentResource: task.currentResource ?? '',
           percentComplete: task.percentComplete ?? 0,
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString()
@@ -1233,7 +1402,7 @@ function App() {
     // Bias the edited task just before (moving earlier) or just after (moving later)
     // the task currently occupying newSeq, then renumber everyone to a clean
     // contiguous 1..N. This shifts the displaced tasks instead of creating a
-    // duplicate seq (mirrors handleTaskResourceChange's resequence step).
+    // duplicate seq (mirrors handleTaskPlannedResourceChange's resequence step).
     const tempSeq = newSeq <= oldSeq ? newSeq - 0.5 : newSeq + 0.5;
     lists[resourceKey] = lists[resourceKey].map(t => t.id === taskId ? { ...t, seq: tempSeq } : t);
     lists[resourceKey] = resequenceTasksInList(lists[resourceKey]);
@@ -1260,9 +1429,9 @@ function App() {
             seq: task.seq,
             startTime: task.startTime ? new Date(task.startTime).toISOString() : '',
             endTime: task.endTime ? new Date(task.endTime).toISOString() : '',
-            actualStart: task.actualStart ?? null,
-            actualEnd: task.actualEnd ?? null,
-            actualDuration: task.actualDuration ?? null,
+            currentStart: task.currentStart ?? null,
+            currentEnd: task.currentEnd ?? null,
+            revisedDuration: task.revisedDuration ?? null,
             percentComplete: task.percentComplete ?? 0
           });
         }
@@ -1278,7 +1447,6 @@ function App() {
     const newDuration = parseInt(newDurationRaw, 10);
     if (isNaN(newDuration)) return;
 
-    let updatedTask = null;
     const company = companies.find(c => c.id === selectedCompanyId);
     const project = company?.projects?.find(p => p.id === projectId);
     const lists = { ...(project?.taskLists || {}) };
@@ -1290,23 +1458,19 @@ function App() {
     const edited = lists[resourceKey].find(t => t.id === taskId);
     const threshold = edited.seq ?? 0;
     lists[resourceKey] = recalcResourceList(lists[resourceKey], threshold, project.startDate, company.calendar);
-    updatedTask = lists[resourceKey].find(t => t.id === taskId) || null;
-
-    if (updatedTask) {
-      try {
-        await tasksAPI.update(String(updatedTask.id), {
-          duration: updatedTask.duration,
-          startTime: updatedTask.startTime ? new Date(updatedTask.startTime).toISOString() : '',
-          endTime: updatedTask.endTime ? new Date(updatedTask.endTime).toISOString() : '',
-          actualStart: updatedTask.actualStart ?? null,
-          actualEnd: updatedTask.actualEnd ?? null,
-          actualDuration: updatedTask.actualDuration ?? null,
-          percentComplete: updatedTask.percentComplete ?? 0
-        });
-        await reloadCurrentUserData();
-      } catch (error) {
-        console.warn('Failed to update task duration in database:', error);
-      }
+    try {
+      const plannedUpdate = await tasksAPI.update(String(edited.id), {
+        duration: edited.duration,
+        startTime: edited.startTime ? new Date(edited.startTime).toISOString() : '',
+        endTime: edited.endTime ? new Date(edited.endTime).toISOString() : ''
+      });
+      if (!plannedUpdate) throw new Error('Failed to update planned task duration');
+      await recalculateAndSaveCurrentResources(
+        projectId, project, company, lists, [getEffectiveCurrentResource(edited)],
+        { anchorTaskId: taskId, taskIdsToSave: [taskId] }
+      );
+    } catch (error) {
+      console.warn('Failed to update task duration in database:', error);
     }
   };
 
@@ -1348,9 +1512,9 @@ function App() {
             startTime: taskToUpdate.startTime ? new Date(taskToUpdate.startTime).toISOString() : '',
             endTime: taskToUpdate.endTime ? new Date(taskToUpdate.endTime).toISOString() : '',
             duration: taskToUpdate.duration,
-            actualStart: taskToUpdate.actualStart ?? null,
-            actualEnd: taskToUpdate.actualEnd ?? null,
-            actualDuration: taskToUpdate.actualDuration ?? null,
+            currentStart: taskToUpdate.currentStart ?? null,
+            currentEnd: taskToUpdate.currentEnd ?? null,
+            revisedDuration: taskToUpdate.revisedDuration ?? null,
             percentComplete: taskToUpdate.percentComplete ?? 0
           });
 
@@ -1371,7 +1535,7 @@ function App() {
     }
   };
 
-  const handleTaskActualStartChange = async (projectId, taskId, newActualStartString) => {
+  const handleTaskCurrentStartChange = async (projectId, taskId, newCurrentStartString) => {
     if (!selectedCompanyId || !backendConnected) return;
 
     const company = companies.find(c => c.id === selectedCompanyId);
@@ -1381,37 +1545,31 @@ function App() {
     if (!company || !project || !found) return;
     const { resourceKey, task } = found;
 
-    const newValue = newActualStartString ? new Date(newActualStartString).toISOString() : null;
-    let actualEnd = task.actualEnd ?? null;
-    if (newValue && task.actualDuration != null && task.actualDuration !== '') {
-      const actualDuration = Number(task.actualDuration);
-      if (Number.isFinite(actualDuration) && actualDuration >= 0) {
-        actualEnd = actualDuration === 0
+    const newValue = newCurrentStartString ? new Date(newCurrentStartString).toISOString() : null;
+    let currentEnd = task.currentEnd ?? null;
+    if (newValue && task.revisedDuration != null && task.revisedDuration !== '') {
+      const revisedDuration = Number(task.revisedDuration);
+      if (Number.isFinite(revisedDuration) && revisedDuration >= 0) {
+        currentEnd = revisedDuration === 0
           ? newValue
-          : addWorkingHours(new Date(newValue), actualDuration, company.calendar).toISOString();
+          : addWorkingHours(new Date(newValue), revisedDuration, company.calendar).toISOString();
       }
     }
     lists[resourceKey] = lists[resourceKey].map(t => t.id === taskId
-      ? { ...t, actualStart: newValue, actualEnd }
+      ? { ...t, currentStart: newValue, currentEnd }
       : t);
-    const updatedTask = lists[resourceKey].find(t => t.id === taskId) || null;
 
-    if (updatedTask) {
-      try {
-        await tasksAPI.update(String(updatedTask.id), {
-          actualStart: updatedTask.actualStart ?? null,
-          actualEnd: updatedTask.actualEnd ?? null,
-          actualDuration: updatedTask.actualDuration ?? null,
-          percentComplete: updatedTask.percentComplete ?? 0
-        });
-        await reloadCurrentUserData();
-      } catch (error) {
-        console.warn('Failed to update task actual start in database:', error);
-      }
+    try {
+      await recalculateAndSaveCurrentResources(
+        projectId, project, company, lists, [getEffectiveCurrentResource(task)],
+        { anchorTaskId: taskId, taskIdsToSave: [taskId] }
+      );
+    } catch (error) {
+      console.warn('Failed to update task current start in database:', error);
     }
   };
 
-  const handleTaskActualEndChange = async (projectId, taskId, newActualEndString) => {
+  const handleTaskCurrentEndChange = async (projectId, taskId, newCurrentEndString) => {
     if (!selectedCompanyId || !backendConnected) return;
 
     const company = companies.find(c => c.id === selectedCompanyId);
@@ -1421,11 +1579,11 @@ function App() {
     if (!company || !project || !found) return;
     const { resourceKey, task } = found;
 
-    const newValue = newActualEndString ? new Date(newActualEndString).toISOString() : null;
-    let actualDuration = task.actualDuration ?? null;
-    if (newValue && task.actualStart) {
+    const newValue = newCurrentEndString ? new Date(newCurrentEndString).toISOString() : null;
+    let revisedDuration = task.revisedDuration ?? null;
+    if (newValue && task.currentStart) {
       try {
-        actualDuration = company.calendar.workingHoursBetween(task.actualStart, newValue);
+        revisedDuration = company.calendar.workingHoursBetween(task.currentStart, newValue);
       } catch (error) {
         if (error instanceof RangeError) {
           alert(error.message);
@@ -1434,29 +1592,23 @@ function App() {
         throw error;
       }
     } else if (!newValue) {
-      actualDuration = null;
+      revisedDuration = null;
     }
     lists[resourceKey] = lists[resourceKey].map(t => t.id === taskId
-      ? { ...t, actualEnd: newValue, actualDuration }
+      ? { ...t, currentEnd: newValue, revisedDuration }
       : t);
-    const updatedTask = lists[resourceKey].find(t => t.id === taskId) || null;
 
-    if (updatedTask) {
-      try {
-        await tasksAPI.update(String(updatedTask.id), {
-          actualStart: updatedTask.actualStart ?? null,
-          actualEnd: updatedTask.actualEnd ?? null,
-          actualDuration: updatedTask.actualDuration ?? null,
-          percentComplete: updatedTask.percentComplete ?? 0
-        });
-        await reloadCurrentUserData();
-      } catch (error) {
-        console.warn('Failed to update task actual end in database:', error);
-      }
+    try {
+      await recalculateAndSaveCurrentResources(
+        projectId, project, company, lists, [getEffectiveCurrentResource(task)],
+        { anchorTaskId: taskId, taskIdsToSave: [taskId] }
+      );
+    } catch (error) {
+      console.warn('Failed to update task current end in database:', error);
     }
   };
 
-  const handleTaskActualDurationChange = async (projectId, taskId, newActualDurationRaw) => {
+  const handleTaskRevisedDurationChange = async (projectId, taskId, newRevisedDurationRaw) => {
     if (!selectedCompanyId || !backendConnected) return;
 
     const company = companies.find(c => c.id === selectedCompanyId);
@@ -1464,39 +1616,37 @@ function App() {
     const lists = { ...(project?.taskLists || {}) };
     const found = findTaskInLists(lists, taskId);
     if (!company || !project || !found) return;
-    const { resourceKey } = found;
+    const { resourceKey, task } = found;
 
-    const parsed = newActualDurationRaw === '' ? null : Number(newActualDurationRaw);
+    const parsed = newRevisedDurationRaw === '' ? null : Number(newRevisedDurationRaw);
     const newValue = parsed == null || !Number.isFinite(parsed) ? null : parsed;
     if (newValue != null && newValue < 0) return;
-    const task = found.task;
-    let actualEnd = task.actualEnd ?? null;
-    if (newValue != null && task.actualStart) {
-      actualEnd = newValue === 0
-        ? task.actualStart
-        : addWorkingHours(new Date(task.actualStart), newValue, company.calendar).toISOString();
+    let currentEnd = task.currentEnd ?? null;
+    if (newValue != null && task.currentStart) {
+      currentEnd = newValue === 0
+        ? task.currentStart
+        : addWorkingHours(new Date(task.currentStart), newValue, company.calendar).toISOString();
     }
+    const percentComplete = calculatePercentComplete(newValue, task.remainingDuration);
     lists[resourceKey] = lists[resourceKey].map(t => t.id === taskId
-      ? { ...t, actualDuration: newValue, actualEnd }
+      ? {
+          ...t,
+          revisedDuration: newValue,
+          currentEnd,
+          ...(percentComplete === null ? {} : { percentComplete })
+        }
       : t);
-    const updatedTask = lists[resourceKey].find(t => t.id === taskId) || null;
-
-    if (updatedTask) {
-      try {
-        await tasksAPI.update(String(updatedTask.id), {
-          actualStart: updatedTask.actualStart ?? null,
-          actualEnd: updatedTask.actualEnd ?? null,
-          actualDuration: updatedTask.actualDuration ?? null,
-          percentComplete: updatedTask.percentComplete ?? 0
-        });
-        await reloadCurrentUserData();
-      } catch (error) {
-        console.warn('Failed to update task actual duration in database:', error);
-      }
+    try {
+      await recalculateAndSaveCurrentResources(
+        projectId, project, company, lists, [getEffectiveCurrentResource(task)],
+        { anchorTaskId: taskId, taskIdsToSave: [taskId] }
+      );
+    } catch (error) {
+      console.warn('Failed to update task current duration in database:', error);
     }
   };
 
-  const handleTaskActualResourceChange = async (projectId, taskId, newActualResource) => {
+  const handleTaskRemainingDurationChange = async (projectId, taskId, newRemainingDurationRaw) => {
     if (!selectedCompanyId || !backendConnected) return;
 
     const company = companies.find(c => c.id === selectedCompanyId);
@@ -1504,29 +1654,30 @@ function App() {
     const lists = { ...(project?.taskLists || {}) };
     const found = findTaskInLists(lists, taskId);
     if (!company || !project || !found) return;
-    const { resourceKey } = found;
+    const { resourceKey, task } = found;
 
-    const newValue = (newActualResource ?? '').trim();
-    lists[resourceKey] = lists[resourceKey].map(t => t.id === taskId ? { ...t, actualResource: newValue } : t);
-    const updatedTask = lists[resourceKey].find(t => t.id === taskId) || null;
-
-    if (updatedTask) {
-      try {
-        await tasksAPI.update(String(updatedTask.id), {
-          actualStart: updatedTask.actualStart ?? null,
-          actualEnd: updatedTask.actualEnd ?? null,
-          actualDuration: updatedTask.actualDuration ?? null,
-          actualResource: updatedTask.actualResource ?? '',
-          percentComplete: updatedTask.percentComplete ?? 0
-        });
-        await reloadCurrentUserData();
-      } catch (error) {
-        console.warn('Failed to update task actual resource in database:', error);
-      }
+    const parsed = newRemainingDurationRaw === '' ? null : Number(newRemainingDurationRaw);
+    const newValue = parsed == null || !Number.isFinite(parsed) ? null : parsed;
+    if (newValue != null && newValue < 0) return;
+    const percentComplete = calculatePercentComplete(task.revisedDuration, newValue);
+    lists[resourceKey] = lists[resourceKey].map(t => t.id === taskId
+      ? {
+          ...t,
+          remainingDuration: newValue,
+          ...(percentComplete === null ? {} : { percentComplete })
+        }
+      : t);
+    try {
+      await recalculateAndSaveCurrentResources(
+        projectId, project, company, lists, [],
+        { taskIdsToSave: [taskId] }
+      );
+    } catch (error) {
+      console.warn('Failed to update task remaining duration in database:', error);
     }
   };
 
-  const handleTaskActualSequenceChange = async (projectId, taskId, newActualSequenceRaw) => {
+  const handleTaskCurrentResourceChange = async (projectId, taskId, newCurrentResource) => {
     if (!selectedCompanyId || !backendConnected) return;
 
     const company = companies.find(c => c.id === selectedCompanyId);
@@ -1534,27 +1685,49 @@ function App() {
     const lists = { ...(project?.taskLists || {}) };
     const found = findTaskInLists(lists, taskId);
     if (!company || !project || !found) return;
-    const { resourceKey } = found;
+    const { resourceKey, task } = found;
 
-    const parsed = newActualSequenceRaw === '' ? null : parseInt(newActualSequenceRaw, 10);
+    const newValue = (newCurrentResource ?? '').trim();
+    if (newValue === (task.currentResource ?? '').trim()) return;
+    const allTasks = Object.values(lists).flat();
+    const currentSequence = newValue ? getNextCurrentSequence(allTasks, taskId, newValue) : null;
+    lists[resourceKey] = lists[resourceKey].map(t => t.id === taskId
+      ? { ...t, currentResource: newValue, currentSequence }
+      : t);
+    try {
+      await recalculateAndSaveCurrentResources(
+        projectId,
+        project,
+        company,
+        lists,
+        [getEffectiveCurrentResource(task), newValue || task.plannedResource || ''],
+        { taskIdsToSave: [taskId] }
+      );
+    } catch (error) {
+      console.warn('Failed to update task current resource in database:', error);
+    }
+  };
+
+  const handleTaskCurrentSequenceChange = async (projectId, taskId, newCurrentSequenceRaw) => {
+    if (!selectedCompanyId || !backendConnected) return;
+
+    const company = companies.find(c => c.id === selectedCompanyId);
+    const project = company?.projects?.find(p => p.id === projectId);
+    const lists = { ...(project?.taskLists || {}) };
+    const found = findTaskInLists(lists, taskId);
+    if (!company || !project || !found) return;
+    const { resourceKey, task } = found;
+
+    const parsed = newCurrentSequenceRaw === '' ? null : parseInt(newCurrentSequenceRaw, 10);
     const newValue = Number.isNaN(parsed) ? null : parsed;
-    lists[resourceKey] = lists[resourceKey].map(t => t.id === taskId ? { ...t, actualSequence: newValue } : t);
-    const updatedTask = lists[resourceKey].find(t => t.id === taskId) || null;
-
-    if (updatedTask) {
-      try {
-        await tasksAPI.update(String(updatedTask.id), {
-          actualStart: updatedTask.actualStart ?? null,
-          actualEnd: updatedTask.actualEnd ?? null,
-          actualDuration: updatedTask.actualDuration ?? null,
-          actualSequence: updatedTask.actualSequence ?? null,
-          actualResource: updatedTask.actualResource ?? '',
-          percentComplete: updatedTask.percentComplete ?? 0
-        });
-        await reloadCurrentUserData();
-      } catch (error) {
-        console.warn('Failed to update task actual sequence in database:', error);
-      }
+    lists[resourceKey] = lists[resourceKey].map(t => t.id === taskId ? { ...t, currentSequence: newValue } : t);
+    try {
+      await recalculateAndSaveCurrentResources(
+        projectId, project, company, lists, [getEffectiveCurrentResource(task)],
+        { taskIdsToSave: [taskId] }
+      );
+    } catch (error) {
+      console.warn('Failed to update task current sequence in database:', error);
     }
   };
 
@@ -1576,11 +1749,11 @@ function App() {
     if (updatedTask) {
       try {
         await tasksAPI.update(String(updatedTask.id), {
-          actualStart: updatedTask.actualStart ?? null,
-          actualEnd: updatedTask.actualEnd ?? null,
-          actualDuration: updatedTask.actualDuration ?? null,
-          actualSequence: updatedTask.actualSequence ?? null,
-          actualResource: updatedTask.actualResource ?? '',
+          currentStart: updatedTask.currentStart ?? null,
+          currentEnd: updatedTask.currentEnd ?? null,
+          revisedDuration: updatedTask.revisedDuration ?? null,
+          currentSequence: updatedTask.currentSequence ?? null,
+          currentResource: updatedTask.currentResource ?? '',
           percentComplete: updatedTask.percentComplete ?? 0
         });
         await reloadCurrentUserData();
@@ -1852,9 +2025,9 @@ function App() {
                         />
                         <input
                           type="text"
-                          placeholder="Resource (optional)"
-                          value={project.resourceInput || ''}
-                          onChange={e => handleResourceInputChange(project.id, e.target.value)}
+                          placeholder="Planned Resource (optional)"
+                          value={project.plannedResourceInput || ''}
+                          onChange={e => handlePlannedResourceInputChange(project.id, e.target.value)}
                           style={{ width: '160px', marginRight: '8px' }}
                         />
                         <input
@@ -1868,19 +2041,21 @@ function App() {
                         <button onClick={() => handleAddTask(project.id)}>Add Task</button>
                       </div>
 
-                      {/* Render persisted taskLists grouped by resource */}
+                      {/* Keep tasks stored by planned resource; group the view by effective resource. */}
                       <div>
                         {(() => {
                           const lists = project.taskLists || {};
-                          const resourceKeys = Object.keys(lists).sort((a, b) => (a || '').localeCompare(b || ''));
-                          if (resourceKeys.length === 0) return <div style={{ color: '#666' }}>No tasks</div>;
-                          return resourceKeys.map(resourceKey => (
-                            <div key={resourceKey || '__unassigned__'} style={{ marginBottom: '12px' }}>
-                              {!hiddenPlannedProjects[project.id] && (
-                                <div style={{ margin: '6px 0', fontSize: '0.95em', fontWeight: '600', color: '#fff' }}>Resource: {resourceKey || '(Unassigned)'}</div>
+                          const resourceGroups = groupTasksByEffectiveResource(Object.values(lists).flat());
+                          if (resourceGroups.length === 0) return <div style={{ color: '#666' }}>No tasks</div>;
+                          return resourceGroups.map(({ resourceKey, resourceType, tasks }) => (
+                            <div key={`${resourceType}:${resourceKey || '__unassigned__'}`} style={{ marginBottom: '12px' }}>
+                              {(resourceType === 'current' || !hiddenPlannedProjects[project.id]) && (
+                                <div style={{ margin: '6px 0', fontSize: '0.95em', fontWeight: '600', color: '#fff' }}>
+                                  {resourceType === 'current' ? 'Current Resource' : 'Planned Resource'}: {resourceKey || '(Unassigned)'}
+                                </div>
                               )}
                               <ul>
-                                {lists[resourceKey]
+                                {tasks
                                   .slice()
                                   .sort(compareTaskOrder)
                                   .map(task => {
@@ -1935,39 +2110,48 @@ function App() {
                                         )}
 
                                         <div style={{ marginTop: '6px', fontSize: '0.95em', color: '#555', display: 'flex', flexWrap: 'wrap', gap: '10px', alignItems: 'center' }}>
-                                          Actual Start:
+                                          Current Start:
                                           <input
                                             type="datetime-local"
-                                            value={formatDateTimeLocal(task.actualStart)}
-                                            onChange={e => handleTaskActualStartChange(project.id, task.id, e.target.value)}
+                                            value={formatDateTimeLocal(task.currentStart)}
+                                            onChange={e => handleTaskCurrentStartChange(project.id, task.id, e.target.value)}
                                             style={{ width: '170px' }}
                                           />
-                                          Actual End:
+                                          Current End:
                                           <input
                                             type="datetime-local"
-                                            value={formatDateTimeLocal(task.actualEnd)}
-                                            onChange={e => handleTaskActualEndChange(project.id, task.id, e.target.value)}
+                                            value={formatDateTimeLocal(task.currentEnd)}
+                                            onChange={e => handleTaskCurrentEndChange(project.id, task.id, e.target.value)}
                                             style={{ width: '170px' }}
                                           />
-                                          Actual Duration:
+                                          Revised Duration:
                                           <input
                                             type="number"
                                             min="0"
                                             step="any"
-                                            value={task.actualDuration ?? ''}
-                                            onChange={e => handleTaskActualDurationChange(project.id, task.id, e.target.value)}
+                                            value={task.revisedDuration ?? ''}
+                                            onChange={e => handleTaskRevisedDurationChange(project.id, task.id, e.target.value)}
                                             style={{ width: '80px' }}
                                           />
-                                          Actual Sequence:
-                                          <ActualSequenceInput
-                                            value={task.actualSequence}
-                                            onCommit={value => handleTaskActualSequenceChange(project.id, task.id, value)}
+                                          Remaining Duration:
+                                          <input
+                                            type="number"
+                                            min="0"
+                                            step="any"
+                                            value={task.remainingDuration ?? ''}
+                                            onChange={e => handleTaskRemainingDurationChange(project.id, task.id, e.target.value)}
                                             style={{ width: '80px' }}
                                           />
-                                          Actual Resource:
+                                          Current Sequence:
+                                          <CurrentSequenceInput
+                                            value={task.currentSequence}
+                                            onCommit={value => handleTaskCurrentSequenceChange(project.id, task.id, value)}
+                                            style={{ width: '80px' }}
+                                          />
+                                          Current Resource:
                                           <ResourceTextInput
-                                            value={task.actualResource ?? ''}
-                                            onCommit={value => handleTaskActualResourceChange(project.id, task.id, value)}
+                                            value={task.currentResource ?? ''}
+                                            onCommit={value => handleTaskCurrentResourceChange(project.id, task.id, value)}
                                             style={{ width: '140px' }}
                                           />
                                           % Complete:
@@ -1983,10 +2167,10 @@ function App() {
 
                                         {!hiddenPlannedProjects[project.id] && (
                                           <div style={{ marginTop: '6px' }}>
-                                            Resource:
+                                            Planned Resource:
                                             <ResourceTextInput
-                                              value={task.resource || ''}
-                                              onCommit={value => handleTaskResourceChange(project.id, task.id, value)}
+                                              value={task.plannedResource || ''}
+                                              onCommit={value => handleTaskPlannedResourceChange(project.id, task.id, value)}
                                               style={{ marginLeft: '8px', width: '180px' }}
                                             />
                                           </div>

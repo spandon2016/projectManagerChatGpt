@@ -95,17 +95,18 @@ function initializeDatabase() {
         userId TEXT NOT NULL,
         projectId TEXT NOT NULL,
         name TEXT NOT NULL,
-        resource TEXT,
+        plannedResource TEXT,
         seq INTEGER,
         duration INTEGER,
         startTime TEXT,
         endTime TEXT,
-        actualStart TEXT,
-        actualEnd TEXT,
-        actualDuration INTEGER,
-        actualSequence INTEGER,
+        currentStart TEXT,
+        currentEnd TEXT,
+        revisedDuration REAL,
+        remaining_duration REAL,
+        currentSequence INTEGER,
         percentComplete REAL,
-        actualResource TEXT,
+        currentResource TEXT,
         createdAt TEXT NOT NULL,
         updatedAt TEXT NOT NULL,
         FOREIGN KEY (scheduleId) REFERENCES schedules(id),
@@ -114,19 +115,117 @@ function initializeDatabase() {
       )
     `);
 
-    db.run(`ALTER TABLE tasks ADD COLUMN actualStart TEXT`, (err) => {
-      if (err && !err.message.includes('duplicate column name')) {
-        console.error('Error adding actualStart column:', err);
+    const migrateCurrentTaskColumns = (mappings, index = 0) => {
+      if (index >= mappings.length) return;
+      const { legacyName, currentName, type } = mappings[index];
+
+      db.all('PRAGMA table_info(tasks)', (err, columns) => {
+        if (err) {
+          console.error(`Error reading task columns for ${currentName} migration:`, err);
+          return;
+        }
+
+        const columnNames = new Set(columns.map(column => column.name));
+        const continueMigration = () => migrateCurrentTaskColumns(mappings, index + 1);
+        if (columnNames.has(legacyName) && !columnNames.has(currentName)) {
+          db.run(`ALTER TABLE tasks RENAME COLUMN ${legacyName} TO ${currentName}`, migrationError => {
+            if (migrationError) {
+              console.error(`Error renaming ${legacyName} column:`, migrationError);
+              return;
+            }
+            continueMigration();
+          });
+        } else if (columnNames.has(legacyName) && columnNames.has(currentName)) {
+          db.run(
+            `UPDATE tasks SET ${currentName} = ${legacyName} WHERE ${currentName} IS NULL`,
+            migrationError => {
+              if (migrationError) {
+                console.error(`Error copying ${legacyName} values to ${currentName}:`, migrationError);
+                return;
+              }
+              db.run(`ALTER TABLE tasks DROP COLUMN ${legacyName}`, dropError => {
+                if (dropError) {
+                  console.error(`Error dropping legacy ${legacyName} column:`, dropError);
+                  return;
+                }
+                continueMigration();
+              });
+            }
+          );
+        } else if (!columnNames.has(currentName)) {
+          db.run(`ALTER TABLE tasks ADD COLUMN ${currentName} ${type}`, migrationError => {
+            if (migrationError) {
+              console.error(`Error adding ${currentName} column:`, migrationError);
+              return;
+            }
+            continueMigration();
+          });
+        } else {
+          continueMigration();
+        }
+      });
+    };
+
+    migrateCurrentTaskColumns([
+      { legacyName: 'actualStart', currentName: 'currentStart', type: 'TEXT' },
+      { legacyName: 'actualEnd', currentName: 'currentEnd', type: 'TEXT' },
+      { legacyName: 'actualSequence', currentName: 'currentSequence', type: 'INTEGER' },
+      { legacyName: 'actualResource', currentName: 'currentResource', type: 'TEXT' }
+    ]);
+    db.all('PRAGMA table_info(tasks)', (err, columns) => {
+      if (err) {
+        console.error('Error reading task columns for plannedResource migration:', err);
+        return;
+      }
+
+      const columnNames = new Set(columns.map(column => column.name));
+      if (columnNames.has('resource') && !columnNames.has('plannedResource')) {
+        db.run('ALTER TABLE tasks RENAME COLUMN resource TO plannedResource', migrationError => {
+          if (migrationError) {
+            console.error('Error renaming resource column:', migrationError);
+          }
+        });
+      } else if (!columnNames.has('plannedResource')) {
+        db.run('ALTER TABLE tasks ADD COLUMN plannedResource TEXT', migrationError => {
+          if (migrationError) {
+            console.error('Error adding plannedResource column:', migrationError);
+          }
+        });
       }
     });
-    db.run(`ALTER TABLE tasks ADD COLUMN actualEnd TEXT`, (err) => {
-      if (err && !err.message.includes('duplicate column name')) {
-        console.error('Error adding actualEnd column:', err);
+    db.all('PRAGMA table_info(tasks)', (err, columns) => {
+      if (err) {
+        console.error('Error reading task columns for revisedDuration migration:', err);
+        return;
+      }
+
+      const columnNames = new Set(columns.map(column => column.name));
+      if (columnNames.has('actualDuration') && !columnNames.has('revisedDuration')) {
+        db.run('ALTER TABLE tasks RENAME COLUMN actualDuration TO revisedDuration', (migrationError) => {
+          if (migrationError) {
+            console.error('Error renaming actualDuration column:', migrationError);
+          }
+        });
+      } else if (!columnNames.has('revisedDuration')) {
+        db.run('ALTER TABLE tasks ADD COLUMN revisedDuration REAL', (migrationError) => {
+          if (migrationError) {
+            console.error('Error adding revisedDuration column:', migrationError);
+          }
+        });
+      } else if (columnNames.has('actualDuration')) {
+        db.run(
+          'UPDATE tasks SET revisedDuration = actualDuration WHERE revisedDuration IS NULL',
+          (migrationError) => {
+            if (migrationError) {
+              console.error('Error copying actualDuration values to revisedDuration:', migrationError);
+            }
+          }
+        );
       }
     });
-    db.run(`ALTER TABLE tasks ADD COLUMN actualDuration INTEGER`, (err) => {
+    db.run(`ALTER TABLE tasks ADD COLUMN remaining_duration REAL`, (err) => {
       if (err && !err.message.includes('duplicate column name')) {
-        console.error('Error adding actualDuration column:', err);
+        console.error('Error adding remaining_duration column:', err);
       }
     });
     db.run(`ALTER TABLE tasks ADD COLUMN percentComplete REAL`, (err) => {
@@ -134,17 +233,6 @@ function initializeDatabase() {
         console.error('Error adding percentComplete column:', err);
       }
     });
-    db.run(`ALTER TABLE tasks ADD COLUMN actualSequence INTEGER`, (err) => {
-      if (err && !err.message.includes('duplicate column name')) {
-        console.error('Error adding actualSequence column:', err);
-      }
-    });
-    db.run(`ALTER TABLE tasks ADD COLUMN actualResource TEXT`, (err) => {
-      if (err && !err.message.includes('duplicate column name')) {
-        console.error('Error adding actualResource column:', err);
-      }
-    });
-
     console.log('Database schema initialized successfully');
   });
 }

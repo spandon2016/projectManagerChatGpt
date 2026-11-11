@@ -216,7 +216,7 @@ async function testIntegrationSchedule() {
         userId,
         projectId: scheduleId,
         name: t.name,
-        resource: RESOURCE,
+        plannedResource: RESOURCE,
         seq: t.seq,
         duration: t.duration,
         startTime: t.startTime.toISOString(),
@@ -238,7 +238,7 @@ async function testIntegrationSchedule() {
 
     // All tasks belong to the single shared resource.
     for (const t of sortedTasks) {
-      assert(t.resource === RESOURCE, `task ${t.seq} resource should be "${RESOURCE}", got "${t.resource}"`);
+      assert(t.plannedResource === RESOURCE, `task ${t.seq} planned resource should be "${RESOURCE}", got "${t.plannedResource}"`);
     }
 
     // Sequence numbers are contiguous 1..3.
@@ -281,7 +281,7 @@ async function testIntegrationSchedule() {
     });
 
     console.log('\n✨ All assertions passed! Tasks were sequenced automatically.');
-    return { userId, companyId, scheduleId, resource: RESOURCE, taskIds: createdTasks.map((t) => t.id) };
+    return { userId, companyId, scheduleId, plannedResource: RESOURCE, taskIds: createdTasks.map((t) => t.id) };
 
   } catch (error) {
     console.error('❌ Test failed:', error.message);
